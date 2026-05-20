@@ -5,8 +5,8 @@ from pathlib import Path
 from app.core.models import ComicMetadata, ComicPage, ImportResult
 from app.importers.novel_txt_importer import NovelImportResult
 from app.services.batch_import_service import batch_import
-from app.storage.repositories import get_book, list_books, list_works
-from app.utils.novel_chapter_parser import NovelChapter, NovelVolume
+from app.storage.repositories import get_book, list_books, list_novel_chapters, list_works
+from app.parsers.novel_chapter_parser import NovelChapter, NovelVolume
 
 
 def test_batch_import_creates_books_and_reuses_work(tmp_path: Path) -> None:
@@ -141,6 +141,9 @@ def test_batch_import_creates_novel_book_from_txt(tmp_path: Path) -> None:
     assert book["chapter_count"] == 2
     assert book["text_length"] == 1200
     assert book["export_format"] == "epub"
+    chapters = list_novel_chapters(int(book["id"]), db_path=db_path)
+    assert len(chapters) == 2
+    assert [chapter["order_index"] for chapter in chapters] == [1, 2]
 
 
 def test_batch_import_novel_uses_fallback_title_and_filename(tmp_path: Path) -> None:
@@ -193,7 +196,7 @@ def _mock_novel_importer(
 ):
     def importer(path: str | Path) -> NovelImportResult:
         chapters = [
-            NovelChapter(title=f"第{index}章", content="正文", index=index)
+            NovelChapter(title=f"第{index}章", content="正文", order_index=index)
             for index in range(1, chapter_count + 1)
         ]
         volumes = [NovelVolume(title=volume_title, volume_number=volume_number, chapters=chapters)]

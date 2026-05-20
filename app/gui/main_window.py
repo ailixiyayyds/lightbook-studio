@@ -7,7 +7,7 @@ from typing import cast
 
 from PySide6.QtCore import Qt
 from PySide6.QtCore import QUrl
-from PySide6.QtGui import QDesktopServices, QPixmap
+from PySide6.QtGui import QDesktopServices, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -37,21 +37,26 @@ from PySide6.QtWidgets import (
 from app.core.config import load_config, save_config
 from app.core.models import ComicMetadata, ImportResult, LightBookError, MangaDirection
 from app.exporters.cbz_exporter import export_cbz
+from app.importers.cbz_importer import import_cbz
 from app.importers.comic_epub_importer import import_comic_epub
 from app.importers.image_folder_importer import import_image_folder
 from app.importers.novel_txt_importer import NovelImportResult, import_novel_txt
-from app.services.batch_export_service import export_book_from_database
+from app.services.batch_export_service import export_book_from_database, export_novel_preview_from_database
 from app.services.batch_import_service import batch_import
 from app.storage.repositories import (
     RowDict,
+    bulk_update_book_status,
     create_work,
-    delete_book,
-    delete_work,
+    create_novel_chapter,
+    delete_novel_chapters_by_book,
+    delete_books,
     get_book,
     get_work,
+    list_novel_chapters,
     list_books_by_work,
     list_books,
     list_books_by_status,
+    update_novel_chapter_title,
     list_works,
     update_book,
     update_work,
@@ -118,7 +123,7 @@ class MainWindow(QMainWindow):
         self.batch_table = QTableWidget(0, len(BATCH_TABLE_COLUMNS))
         self.batch_table.setHorizontalHeaderLabels(BATCH_TABLE_COLUMNS)
         self.batch_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.batch_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.batch_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.batch_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.batch_table.verticalHeader().setVisible(False)
         self.batch_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
@@ -126,6 +131,8 @@ class MainWindow(QMainWindow):
         self.batch_table.itemSelectionChanged.connect(self._on_batch_selection_changed)
         self.batch_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.batch_table.customContextMenuRequested.connect(self._show_batch_context_menu)
+        self.batch_select_all_shortcut = QShortcut(QKeySequence.StandardKey.SelectAll, self.batch_table)
+        self.batch_select_all_shortcut.activated.connect(self.batch_table.selectAll)
 
         self.batch_series_title_edit = QLineEdit()
         self.batch_book_title_edit = QLineEdit()
@@ -139,6 +146,31 @@ class MainWindow(QMainWindow):
         self.batch_language_edit = QLineEdit("zh")
         self.batch_direction_combo = QComboBox()
         self.batch_direction_combo.addItems(["rtl", "ltr", "webtoon"])
+
+        self.batch_chapter_label = QLabel("章节列表")
+        self.batch_chapter_table = QTableWidget(0, 3)
+        self.batch_chapter_table.setHorizontalHeaderLabels(["order_index", "title", "字数"])
+        self.batch_chapter_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.batch_chapter_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.batch_chapter_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.batch_chapter_table.verticalHeader().setVisible(False)
+        self.batch_chapter_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.batch_chapter_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.batch_chapter_table.itemSelectionChanged.connect(self._on_chapter_selection_changed)
+
+        self.batch_chapter_title_label = QLabel("章节标题")
+        self.batch_chapter_title_edit = QLineEdit()
+        self.batch_save_chapter_title_button = QPushButton("保存章节标题")
+        self.batch_save_chapter_title_button.clicked.connect(self._save_selected_chapter_title)
+        self.batch_preview_epub_button = QPushButton("生成预览 EPUB")
+        self.batch_preview_epub_button.clicked.connect(self._generate_preview_epub)
+        self.batch_open_preview_epub_button = QPushButton("打开预览 EPUB")
+        self.batch_open_preview_epub_button.clicked.connect(self._open_preview_epub)
+        self.batch_chapter_preview_label = QLabel("正文预览")
+        self.batch_chapter_preview_edit = QTextEdit()
+        self.batch_chapter_preview_edit.setReadOnly(True)
+        self.batch_chapter_preview_edit.setMinimumHeight(180)
+        self._set_novel_chapter_widgets_visible(False)
 
     def _create_settings_widgets(self) -> None:
         self.settings_output_label = QLabel("未选择")
@@ -217,8 +249,12 @@ class MainWindow(QMainWindow):
         scan_txts_button.clicked.connect(self._batch_scan_txts)
         refresh_button = QPushButton("刷新")
         refresh_button.clicked.connect(self._refresh_batch_table)
-        delete_selected_button = QPushButton("删除选中")
-        delete_selected_button.clicked.connect(self._delete_selected_batch_book)
+        mark_ready_button = QPushButton("选中项标记 ready")
+        mark_ready_button.clicked.connect(lambda: self._mark_selected_batch_books("ready"))
+        mark_need_review_button = QPushButton("选中项标记 need_review")
+        mark_need_review_button.clicked.connect(lambda: self._mark_selected_batch_books("need_review"))
+        delete_selected_button = QPushButton("删除选中项")
+        delete_selected_button.clicked.connect(self._delete_selected_batch_books)
 
         top_buttons = QHBoxLayout()
         top_buttons.addWidget(choose_epubs_button)
@@ -228,6 +264,8 @@ class MainWindow(QMainWindow):
         top_buttons.addWidget(scan_epubs_button)
         top_buttons.addWidget(scan_txts_button)
         top_buttons.addStretch()
+        top_buttons.addWidget(mark_ready_button)
+        top_buttons.addWidget(mark_need_review_button)
         top_buttons.addWidget(delete_selected_button)
         top_buttons.addWidget(refresh_button)
 
@@ -255,10 +293,22 @@ class MainWindow(QMainWindow):
         action_buttons.addWidget(export_selected_button)
         action_buttons.addWidget(export_ready_button)
 
+        preview_buttons = QHBoxLayout()
+        preview_buttons.addWidget(self.batch_save_chapter_title_button)
+        preview_buttons.addWidget(self.batch_preview_epub_button)
+        preview_buttons.addWidget(self.batch_open_preview_epub_button)
+
         form_container = QWidget()
         form_layout = QVBoxLayout()
         form_layout.addLayout(form)
         form_layout.addLayout(action_buttons)
+        form_layout.addWidget(self.batch_chapter_label)
+        form_layout.addWidget(self.batch_chapter_table)
+        form_layout.addWidget(self.batch_chapter_title_label)
+        form_layout.addWidget(self.batch_chapter_title_edit)
+        form_layout.addLayout(preview_buttons)
+        form_layout.addWidget(self.batch_chapter_preview_label)
+        form_layout.addWidget(self.batch_chapter_preview_edit)
         form_layout.addStretch()
         form_container.setLayout(form_layout)
 
@@ -589,6 +639,23 @@ class MainWindow(QMainWindow):
         if book_id is not None:
             self._load_batch_book(book_id)
 
+    def _selected_batch_book_ids(self) -> list[int]:
+        selected_rows = self.batch_table.selectionModel().selectedRows()
+        row_numbers = sorted({index.row() for index in selected_rows})
+        book_ids: list[int] = []
+        for row in row_numbers:
+            item = self.batch_table.item(row, 0)
+            if item is None:
+                continue
+            book_id = item.data(Qt.ItemDataRole.UserRole)
+            if book_id is not None:
+                book_ids.append(int(book_id))
+        if not book_ids:
+            book_id = self._selected_batch_book_id()
+            if book_id is not None:
+                book_ids.append(book_id)
+        return book_ids
+
     def _selected_batch_book_id(self) -> int | None:
         row = self.batch_table.currentRow()
         if row < 0:
@@ -603,62 +670,86 @@ class MainWindow(QMainWindow):
         row = self.batch_table.indexAt(position).row()  # type: ignore[arg-type]
         if row < 0:
             return
-        self.batch_table.selectRow(row)
+        if not self.batch_table.selectionModel().isRowSelected(row, self.batch_table.rootIndex()):
+            self.batch_table.selectRow(row)
+        else:
+            self.batch_table.setCurrentCell(row, 0)
 
         menu = QMenu(self)
+        mark_ready_action = menu.addAction("标记 ready")
+        mark_need_review_action = menu.addAction("标记 need_review")
+        menu.addSeparator()
         delete_action = menu.addAction("删除")
         open_folder_action = menu.addAction("打开来源文件夹")
+        menu.addSeparator()
         reparse_action = menu.addAction("重新解析")
         selected_action = menu.exec(self.batch_table.viewport().mapToGlobal(position))  # type: ignore[arg-type]
 
-        if selected_action == delete_action:
-            self._delete_selected_batch_book()
+        if selected_action == mark_ready_action:
+            self._mark_selected_batch_books("ready")
+        elif selected_action == mark_need_review_action:
+            self._mark_selected_batch_books("need_review")
+        elif selected_action == delete_action:
+            self._delete_selected_batch_books()
         elif selected_action == open_folder_action:
             self._open_selected_source_folder()
         elif selected_action == reparse_action:
             self._reparse_selected_batch_book()
 
-    def _delete_selected_batch_book(self) -> None:
-        book_id = self._selected_batch_book_id()
-        if book_id is None:
-            self._show_error("请先选择一个 book。")
+    def _mark_selected_batch_books(self, status: str) -> None:
+        book_ids = self._selected_batch_book_ids()
+        if not book_ids:
+            self._show_error("请先选择一个或多个 book。")
             return
 
-        book = get_book(book_id)
-        if book is None:
+        try:
+            updated_count = bulk_update_book_status(book_ids, status)
+        except Exception as exc:
+            logger.exception("Failed to update selected batch book statuses")
+            self._show_error(f"标记状态失败：{exc}")
+            return
+
+        keep_selected = book_ids[-1] if book_ids else None
+        self._refresh_batch_table(selected_book_id=keep_selected)
+        QMessageBox.information(self, "批量整理", f"已将 {updated_count} 个条目标记为 {status}。")
+
+    def _delete_selected_batch_books(self) -> None:
+        book_ids = self._selected_batch_book_ids()
+        if not book_ids:
+            self._show_error("请先选择一个或多个 book。")
+            return
+
+        books = [book for book_id in book_ids if (book := get_book(book_id)) is not None]
+        if not books:
             self._show_error("找不到选中的 book。")
             self._refresh_batch_table()
             return
 
-        source_path = str(book.get("source_path") or "")
+        preview_paths = [str(book.get("source_path") or "") for book in books[:10]]
+        extra_count = len(books) - len(preview_paths)
+        path_text = "\n".join(preview_paths)
+        if extra_count > 0:
+            path_text += f"\n... 以及另外 {extra_count} 项"
         answer = QMessageBox.question(
             self,
             "删除",
-            "从批量整理列表和数据库中删除选中项？\n"
-            f"{source_path}\n\n"
-            "磁盘上的 EPUB 或图片文件夹不会被删除。",
+            f"从批量整理列表和数据库中删除选中的 {len(books)} 项？\n"
+            f"{path_text}\n\n"
+            "只会删除数据库记录和关联 novel_chapters / export_jobs，不会删除原始文件。",
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
 
-        work_id = int(book["work_id"])
         try:
-            delete_book(book_id)
+            deleted_count = delete_books([int(book["id"]) for book in books])
             self.current_batch_book_id = None
-            if not list_books_by_work(work_id):
-                delete_empty_answer = QMessageBox.question(
-                    self,
-                    "删除空作品",
-                    "这个 work 下已经没有 book，是否同时删除空 work？",
-                )
-                if delete_empty_answer == QMessageBox.StandardButton.Yes:
-                    delete_work(work_id)
         except Exception as exc:
-            logger.exception("Failed to delete batch book")
+            logger.exception("Failed to delete selected batch books")
             self._show_error(f"删除失败：{exc}")
             return
 
         self._refresh_batch_table()
+        QMessageBox.information(self, "批量整理", f"已删除 {deleted_count} 个条目。")
 
     def _open_selected_source_folder(self) -> None:
         book_id = self._selected_batch_book_id()
@@ -715,6 +806,7 @@ class MainWindow(QMainWindow):
                     export_format="epub",
                     status="need_review",
                 )
+                self._replace_novel_chapters(book_id, novel_result)
             else:
                 import_result = self._import_result_for_book(book)
                 series_title, book_title, volume_number = _resolve_titles_from_import(
@@ -727,7 +819,7 @@ class MainWindow(QMainWindow):
                     work_id=int(work["id"]),
                     title=book_title,
                     volume_number=volume_number,
-                    media_type="manga",
+                    media_type="comic",
                     source_type=import_result.source_type,
                     page_count=len(import_result.pages),
                     chapter_count=0,
@@ -832,8 +924,139 @@ class MainWindow(QMainWindow):
         self.batch_direction_combo.setEnabled(not is_novel)
         if is_novel:
             self.batch_direction_combo.setToolTip("轻小说导出 EPUB，不使用漫画阅读方向。")
+            self._load_batch_chapters(book_id)
         else:
             self.batch_direction_combo.setToolTip("")
+            self._load_batch_chapters(None)
+        self._set_novel_chapter_widgets_visible(is_novel)
+
+    def _set_novel_chapter_widgets_visible(self, visible: bool) -> None:
+        for widget in (
+            self.batch_chapter_label,
+            self.batch_chapter_table,
+            self.batch_chapter_title_label,
+            self.batch_chapter_title_edit,
+            self.batch_save_chapter_title_button,
+            self.batch_preview_epub_button,
+            self.batch_open_preview_epub_button,
+            self.batch_chapter_preview_label,
+            self.batch_chapter_preview_edit,
+        ):
+            widget.setVisible(visible)
+
+    def _load_batch_chapters(self, book_id: int | None) -> None:
+        self.batch_chapter_table.blockSignals(True)
+        self.batch_chapter_table.setRowCount(0)
+        self.batch_chapter_title_edit.clear()
+        self.batch_chapter_preview_edit.clear()
+        if book_id is not None:
+            for row_index, chapter in enumerate(list_novel_chapters(book_id)):
+                self.batch_chapter_table.insertRow(row_index)
+                row_values = [
+                    str(chapter.get("order_index") or row_index + 1),
+                    str(chapter.get("title") or ""),
+                    str(len(str(chapter.get("content") or ""))),
+                ]
+                for column_index, value in enumerate(row_values):
+                    item = QTableWidgetItem(value)
+                    item.setData(Qt.ItemDataRole.UserRole, int(chapter["id"]))
+                    self.batch_chapter_table.setItem(row_index, column_index, item)
+        self.batch_chapter_table.blockSignals(False)
+        if self.batch_chapter_table.rowCount() > 0:
+            self.batch_chapter_table.selectRow(0)
+            self._on_chapter_selection_changed()
+
+    def _selected_chapter_id(self) -> int | None:
+        row = self.batch_chapter_table.currentRow()
+        if row < 0:
+            return None
+        item = self.batch_chapter_table.item(row, 0)
+        if item is None:
+            return None
+        chapter_id = item.data(Qt.ItemDataRole.UserRole)
+        return int(chapter_id) if chapter_id is not None else None
+
+    def _on_chapter_selection_changed(self) -> None:
+        if self.current_batch_book_id is None:
+            return
+        chapter_id = self._selected_chapter_id()
+        if chapter_id is None:
+            self.batch_chapter_title_edit.clear()
+            self.batch_chapter_preview_edit.clear()
+            return
+        for chapter in list_novel_chapters(self.current_batch_book_id):
+            if int(chapter["id"]) == chapter_id:
+                self.batch_chapter_title_edit.setText(str(chapter.get("title") or ""))
+                self.batch_chapter_preview_edit.setPlainText(str(chapter.get("content") or ""))
+                return
+
+    def _save_selected_chapter_title(self, show_message: bool = True) -> bool:
+        chapter_id = self._selected_chapter_id()
+        if chapter_id is None:
+            if show_message:
+                self._show_error("请先选择一个章节。")
+            return False
+        title = self.batch_chapter_title_edit.text().strip() or "正文"
+        try:
+            update_novel_chapter_title(chapter_id, title)
+        except Exception as exc:
+            logger.exception("Failed to save novel chapter title")
+            self._show_error(f"保存章节标题失败：{exc}")
+            return False
+        if self.current_batch_book_id is not None:
+            self._load_batch_chapters(self.current_batch_book_id)
+        if show_message:
+            QMessageBox.information(self, "批量整理", "章节标题已保存。")
+        return True
+
+    def _generate_preview_epub(self) -> None:
+        book_id = self.current_batch_book_id
+        if book_id is None:
+            self._show_error("请先选择一个 book。")
+            return
+        book = get_book(book_id)
+        if book is None or not _is_novel_db_book(book):
+            self._show_error("请先选择一个轻小说 book。")
+            return
+        if not self._save_batch_metadata(show_message=False):
+            return
+        if self._selected_chapter_id() is not None and not self._save_selected_chapter_title(show_message=False):
+            return
+        preview_path = _preview_epub_path(book_id)
+        try:
+            export_novel_preview_from_database(book_id, preview_path)
+        except Exception as exc:
+            logger.exception("Failed to generate preview EPUB")
+            self._show_error(f"生成预览 EPUB 失败：{exc}")
+            return
+        QMessageBox.information(self, "批量整理", f"预览 EPUB 已生成：\n{preview_path}")
+
+    def _open_preview_epub(self) -> None:
+        book_id = self.current_batch_book_id
+        if book_id is None:
+            self._show_error("请先选择一个 book。")
+            return
+        preview_path = _preview_epub_path(book_id)
+        if not preview_path.exists():
+            self._show_error("请先生成预览 EPUB。")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(preview_path.resolve())))
+
+    def _replace_novel_chapters(self, book_id: int, novel_result: NovelImportResult) -> None:
+        delete_novel_chapters_by_book(book_id)
+        order_index = 1
+        for volume in novel_result.volumes:
+            volume_title = str(getattr(volume, "title", "") or "")
+            for chapter in getattr(volume, "chapters", []):
+                chapter_title = str(getattr(chapter, "title", "") or "正文")
+                title = f"{volume_title} {chapter_title}".strip() if volume_title else chapter_title
+                create_novel_chapter(
+                    book_id=book_id,
+                    title=title,
+                    content=str(getattr(chapter, "content", "") or ""),
+                    order_index=order_index,
+                )
+                order_index += 1
 
     def _clear_batch_form(self) -> None:
         self.batch_series_title_edit.clear()
@@ -849,6 +1072,8 @@ class MainWindow(QMainWindow):
         self.batch_translator_edit.setEnabled(True)
         self.batch_direction_combo.setEnabled(True)
         self.batch_direction_combo.setToolTip("")
+        self._load_batch_chapters(None)
+        self._set_novel_chapter_widgets_visible(False)
 
     def _save_batch_metadata(self, show_message: bool = True) -> bool:
         if self.current_batch_book_id is None:
@@ -892,7 +1117,7 @@ class MainWindow(QMainWindow):
                     self.current_batch_book_id,
                     title=book_title,
                     volume_number=volume_number,
-                    media_type="manga",
+                    media_type="comic",
                     export_format="cbz",
                     translator=self.batch_translator_edit.text().strip(),
                     manga_direction=self.batch_direction_combo.currentText(),
@@ -912,14 +1137,20 @@ class MainWindow(QMainWindow):
         return True
 
     def _export_selected_batch_book(self) -> None:
-        book_id = self._selected_batch_book_id()
-        if book_id is None:
-            self._show_error("请先选择一个 book。")
+        book_ids = self._selected_batch_book_ids()
+        if not book_ids:
+            self._show_error("请先选择一个或多个 book。")
             return
-        self.current_batch_book_id = book_id
-        if not self._save_batch_metadata(show_message=False):
-            return
-        self._export_batch_books([book_id])
+        current_book_id = self._selected_batch_book_id()
+        if current_book_id is not None and current_book_id in book_ids:
+            self.current_batch_book_id = current_book_id
+            if not self._save_batch_metadata(show_message=False):
+                return
+            book = get_book(current_book_id)
+            if book is not None and _is_novel_db_book(book) and self._selected_chapter_id() is not None:
+                if not self._save_selected_chapter_title(show_message=False):
+                    return
+        self._export_batch_books(book_ids)
 
     def _export_all_ready_books(self) -> None:
         ready_books = list_books_by_status("ready")
@@ -974,6 +1205,8 @@ class MainWindow(QMainWindow):
         source_type = str(book["source_type"])
         if source_type == "epub":
             return import_comic_epub(source_path)
+        if source_type == "cbz":
+            return import_cbz(source_path)
         if source_type == "image_folder":
             return import_image_folder(source_path)
         raise LightBookError(f"不支持的 source_type：{source_type}")
@@ -998,6 +1231,10 @@ class MainWindow(QMainWindow):
 
     def _show_error(self, message: str) -> None:
         QMessageBox.critical(self, "LightBook Studio", message)
+
+
+def _preview_epub_path(book_id: int) -> Path:
+    return Path("data") / "previews" / str(book_id) / "preview.epub"
 
 
 def _split_terms(value: str) -> list[str]:

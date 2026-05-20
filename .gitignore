@@ -1,7 +1,10 @@
+**pycache**/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest_tmp/
 data/
 *.db
 config.json
 .venv/
+.claude/

@@ -32,13 +32,16 @@ def connect(db_path: str | Path = DEFAULT_DATABASE_PATH) -> sqlite3.Connection:
 
 
 def _migrate_database(connection: sqlite3.Connection) -> None:
-    _ensure_column(connection, "books", "media_type", "TEXT NOT NULL DEFAULT 'manga'")
+    _ensure_column(connection, "books", "media_type", "TEXT DEFAULT 'comic'")
     _ensure_column(connection, "books", "translator", "TEXT DEFAULT ''")
     _ensure_column(connection, "books", "manga_direction", "TEXT DEFAULT 'rtl'")
     _ensure_column(connection, "books", "chapter_count", "INTEGER DEFAULT 0")
     _ensure_column(connection, "books", "text_length", "INTEGER DEFAULT 0")
-    _ensure_column(connection, "books", "export_format", "TEXT NOT NULL DEFAULT 'cbz'")
+    _ensure_column(connection, "books", "export_format", "TEXT DEFAULT ''")
+    _ensure_column(connection, "books", "cover_override_path", "TEXT DEFAULT ''")
+    _ensure_novel_chapters_table(connection)
     _ensure_index(connection, "idx_books_media_type", "books", "media_type")
+    _ensure_index(connection, "idx_novel_chapters_book_id", "novel_chapters", "book_id")
 
 
 def _ensure_column(
@@ -65,4 +68,21 @@ def _ensure_index(
 ) -> None:
     connection.execute(
         f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name}({column_name})"
+    )
+
+
+def _ensure_novel_chapters_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS novel_chapters (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          book_id INTEGER NOT NULL,
+          title TEXT NOT NULL,
+          content TEXT NOT NULL,
+          order_index INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(book_id) REFERENCES books(id)
+        )
+        """
     )

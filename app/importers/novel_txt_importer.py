@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.core.models import ImporterError
-from app.utils.novel_chapter_parser import NovelVolume, parse_novel_text
+from app.parsers.novel_chapter_parser import NovelVolume, parse_novel_text
 from app.utils.text_cleaner import clean_novel_text
 from app.utils.text_encoding import detect_and_read_text
 from app.utils.wenku8_filename import parse_wenku8_txt_filename
@@ -43,8 +43,11 @@ def import_novel_txt(path: str | Path) -> NovelImportResult:
     filename_info = parse_wenku8_txt_filename(source_path.name)
     raw_text, encoding = detect_and_read_text(source_path)
     cleaned_text = clean_novel_text(raw_text)
-    volumes = parse_novel_text(cleaned_text)
+    parse_result = parse_novel_text(cleaned_text)
+    volumes = parse_result.volumes
     title_guess, author_guess, source_book_id = _guess_metadata(cleaned_text)
+    title_guess = title_guess or parse_result.title_guess
+    author_guess = author_guess or parse_result.author_guess
     chapter_count = sum(len(volume.chapters) for volume in volumes)
 
     warnings: list[str] = []

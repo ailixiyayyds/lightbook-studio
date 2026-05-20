@@ -34,8 +34,8 @@ def export_cbz(
         comicinfo_xml = build_comicinfo_xml(metadata_to_write)
         with zipfile.ZipFile(cbz_path, "w", compression=zipfile.ZIP_DEFLATED) as cbz:
             cbz.writestr("ComicInfo.xml", comicinfo_xml)
-            if import_result.source_type == "epub":
-                _write_epub_pages(cbz, import_result)
+            if import_result.source_type in {"epub", "cbz"}:
+                _write_archive_pages(cbz, import_result)
             else:
                 _write_file_pages(cbz, import_result.pages)
 
@@ -44,7 +44,7 @@ def export_cbz(
     except OSError as exc:
         raise ExporterError(f"导出失败：{exc}") from exc
     except zipfile.BadZipFile as exc:
-        raise ExporterError(f"读取 EPUB 源文件失败：{exc}") from exc
+        raise ExporterError(f"读取归档源文件失败：{exc}") from exc
     except Exception as exc:
         if isinstance(exc, ExporterError):
             raise
@@ -65,18 +65,18 @@ def _write_file_pages(cbz: zipfile.ZipFile, pages: list[ComicPage]) -> None:
         cbz.writestr(_cbz_page_name(index, page), page.source_path.read_bytes())
 
 
-def _write_epub_pages(cbz: zipfile.ZipFile, import_result: ImportResult) -> None:
+def _write_archive_pages(cbz: zipfile.ZipFile, import_result: ImportResult) -> None:
     with zipfile.ZipFile(import_result.source_path) as source_zip:
         for index, page in enumerate(import_result.pages, start=1):
             if not page.archive_path:
-                raise ExporterError(f"页面缺少 EPUB 内部路径：{page.display_name}")
+                raise ExporterError(f"页面缺少归档内部路径：{page.display_name}")
             cbz.writestr(_cbz_page_name(index, page), source_zip.read(page.archive_path))
 
 
 def _read_page_bytes(import_result: ImportResult, page: ComicPage) -> bytes:
-    if import_result.source_type == "epub":
+    if import_result.source_type in {"epub", "cbz"}:
         if not page.archive_path:
-            raise ExporterError(f"页面缺少 EPUB 内部路径：{page.display_name}")
+            raise ExporterError(f"页面缺少归档内部路径：{page.display_name}")
         with zipfile.ZipFile(import_result.source_path) as source_zip:
             return source_zip.read(page.archive_path)
 

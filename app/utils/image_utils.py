@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PIL import Image
 
-SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
 
 def is_supported_image_path(path: str | Path) -> bool:
@@ -18,7 +18,7 @@ def normalize_image_extension(value: str | Path) -> str:
     extension = suffix.lstrip(".").casefold()
     if extension == "jpeg":
         return "jpg"
-    if extension in {"jpg", "png", "webp"}:
+    if extension in {"jpg", "png", "webp", "gif"}:
         return extension
     return "jpg"
 

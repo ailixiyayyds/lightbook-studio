@@ -52,10 +52,12 @@ def test_export_novel_epub_contains_chapters_and_escaped_html(tmp_path: Path) ->
 
     with ZipFile(output_path) as archive:
         names = set(archive.namelist())
-        assert "chapters/chapter_0001.xhtml" in names
-        assert "chapters/chapter_0002.xhtml" in names
-        assert "nav.xhtml" in names
-        chapter_html = archive.read("chapters/chapter_0001.xhtml").decode("utf-8")
+        chapter_1_name = _archive_name(names, "chapters/chapter_0001.xhtml")
+        chapter_2_name = _archive_name(names, "chapters/chapter_0002.xhtml")
+        assert chapter_1_name is not None
+        assert chapter_2_name is not None
+        assert _archive_name(names, "nav.xhtml") is not None
+        chapter_html = archive.read(chapter_1_name).decode("utf-8")
 
     assert "5 &lt; 6 &amp; 7 &gt; 3" in chapter_html
     assert "<p>第二段</p>" in chapter_html
@@ -107,3 +109,7 @@ def test_export_novel_epub_rejects_empty_chapters(tmp_path: Path) -> None:
             chapters=[],
             output_path=tmp_path / "empty.epub",
         )
+
+
+def _archive_name(names: set[str], suffix: str) -> str | None:
+    return next((name for name in names if name.endswith(suffix)), None)

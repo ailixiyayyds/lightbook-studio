@@ -110,12 +110,13 @@ def create_book(
     source_path: str,
     title: str = "",
     volume_number: int | None = None,
-    media_type: str = "manga",
+    media_type: str = "comic",
     page_count: int = 0,
     chapter_count: int = 0,
     text_length: int = 0,
     export_format: str = "cbz",
     cover_path: str = "",
+    cover_override_path: str = "",
     translator: str = "",
     manga_direction: str = "rtl",
     status: str = "need_review",
@@ -128,10 +129,10 @@ def create_book(
             INSERT INTO books (
               work_id, title, volume_number, media_type, source_type, source_path,
               page_count, chapter_count, text_length, export_format,
-              cover_path, translator, manga_direction,
+              cover_path, cover_override_path, translator, manga_direction,
               status, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 work_id,
@@ -145,6 +146,7 @@ def create_book(
                 text_length,
                 export_format,
                 cover_path,
+                cover_override_path,
                 translator,
                 manga_direction,
                 status,
@@ -169,6 +171,7 @@ def update_book(
     text_length: int | None = None,
     export_format: str | None = None,
     cover_path: str | None = None,
+    cover_override_path: str | None = None,
     translator: str | None = None,
     manga_direction: str | None = None,
     status: str | None = None,
@@ -186,6 +189,7 @@ def update_book(
             "text_length": text_length,
             "export_format": export_format,
             "cover_path": cover_path,
+            "cover_override_path": cover_override_path,
             "translator": translator,
             "manga_direction": manga_direction,
             "status": status,
@@ -212,9 +216,35 @@ def delete_book(
     db_path: str | Path = DEFAULT_DATABASE_PATH,
 ) -> bool:
     with closing(connect(db_path)) as connection, connection:
+        connection.execute("DELETE FROM novel_chapters WHERE book_id = ?", (book_id,))
         connection.execute("DELETE FROM export_jobs WHERE book_id = ?", (book_id,))
         cursor = connection.execute("DELETE FROM books WHERE id = ?", (book_id,))
         return cursor.rowcount > 0
+
+
+def delete_books(
+    book_ids: list[int],
+    *,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> int:
+    ids = _clean_ids(book_ids)
+    if not ids:
+        return 0
+    placeholders = _placeholders(ids)
+    with closing(connect(db_path)) as connection, connection:
+        connection.execute(
+            f"DELETE FROM novel_chapters WHERE book_id IN ({placeholders})",
+            ids,
+        )
+        connection.execute(
+            f"DELETE FROM export_jobs WHERE book_id IN ({placeholders})",
+            ids,
+        )
+        cursor = connection.execute(
+            f"DELETE FROM books WHERE id IN ({placeholders})",
+            ids,
+        )
+        return cursor.rowcount
 
 
 def list_books(
@@ -250,6 +280,98 @@ def list_books_by_status(
             (status,),
         ).fetchall()
         return [_row_to_dict_required(row) for row in rows]
+
+
+def bulk_update_book_status(
+    book_ids: list[int],
+    status: str,
+    *,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> int:
+    ids = _clean_ids(book_ids)
+    if not ids:
+        return 0
+    placeholders = _placeholders(ids)
+    with closing(connect(db_path)) as connection, connection:
+        cursor = connection.execute(
+            f"UPDATE books SET status = ?, updated_at = ? WHERE id IN ({placeholders})",
+            [status, _now(), *ids],
+        )
+        return cursor.rowcount
+
+
+def update_book_cover_override(
+    book_id: int,
+    cover_override_path: str,
+    *,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> RowDict | None:
+    return update_book(
+        book_id,
+        cover_override_path=cover_override_path,
+        db_path=db_path,
+    )
+
+
+def create_novel_chapter(
+    *,
+    book_id: int,
+    title: str,
+    content: str,
+    order_index: int,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> RowDict:
+    timestamp = _now()
+    with closing(connect(db_path)) as connection, connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO novel_chapters (
+              book_id, title, content, order_index, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (book_id, title, content, order_index, timestamp, timestamp),
+        )
+        return _get_required_by_id(connection, "novel_chapters", int(cursor.lastrowid))
+
+
+def update_novel_chapter_title(
+    chapter_id: int,
+    title: str,
+    *,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> RowDict | None:
+    return _update_row("novel_chapters", chapter_id, {"title": title}, db_path)
+
+
+def list_novel_chapters(
+    book_id: int,
+    *,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> list[RowDict]:
+    with closing(connect(db_path)) as connection, connection:
+        rows = connection.execute(
+            """
+            SELECT * FROM novel_chapters
+            WHERE book_id = ?
+            ORDER BY order_index, id
+            """,
+            (book_id,),
+        ).fetchall()
+        return [_row_to_dict_required(row) for row in rows]
+
+
+def delete_novel_chapters_by_book(
+    book_id: int,
+    *,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> int:
+    with closing(connect(db_path)) as connection, connection:
+        cursor = connection.execute(
+            "DELETE FROM novel_chapters WHERE book_id = ?",
+            (book_id,),
+        )
+        return cursor.rowcount
 
 
 def create_export_job(
@@ -357,6 +479,14 @@ def _get_required_by_id(connection: sqlite3.Connection, table_name: str, row_id:
 
 def _without_none(values: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in values.items() if value is not None}
+
+
+def _clean_ids(row_ids: list[int]) -> list[int]:
+    return [int(row_id) for row_id in row_ids]
+
+
+def _placeholders(values: list[int]) -> str:
+    return ", ".join("?" for _ in values)
 
 
 def _row_to_dict(row: sqlite3.Row | None) -> RowDict | None:

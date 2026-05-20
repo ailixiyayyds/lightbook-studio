@@ -5,11 +5,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.core.models import ImportResult
+from app.importers.cbz_importer import import_cbz
 from app.importers.comic_epub_importer import import_comic_epub
 from app.importers.image_folder_importer import import_image_folder
 from app.importers.novel_txt_importer import NovelImportResult, import_novel_txt
 from app.storage.database import DEFAULT_DATABASE_PATH
-from app.storage.repositories import create_book, create_work, list_works
+from app.storage.repositories import (
+    create_book,
+    create_novel_chapter,
+    create_work,
+    delete_novel_chapters_by_book,
+    list_works,
+)
 from app.utils.filename_parser import parse_comic_filename
 from app.utils.filename import sanitize_windows_filename
 
@@ -30,6 +37,7 @@ def batch_import(
     *,
     db_path: str | Path = DEFAULT_DATABASE_PATH,
     epub_importer: Importer = import_comic_epub,
+    cbz_importer: Importer = import_cbz,
     image_folder_importer: Importer = import_image_folder,
     novel_txt_importer: NovelImporter = import_novel_txt,
 ) -> BatchImportResult:
@@ -43,8 +51,9 @@ def batch_import(
             if path.suffix.casefold() == ".txt" and not path.is_dir():
                 novel_result = novel_txt_importer(path)
                 book = _create_novel_book(path, novel_result, work_cache, db_path)
+                _save_novel_chapters(int(book["id"]), novel_result, db_path)
             else:
-                importer = _select_importer(path, epub_importer, image_folder_importer)
+                importer = _select_importer(path, epub_importer, cbz_importer, image_folder_importer)
                 import_result = importer(path)
                 series_title, book_title, volume_number = _resolve_titles(path, import_result)
                 work = _get_or_create_work(series_title, import_result, work_cache, db_path)
@@ -52,7 +61,7 @@ def batch_import(
                     work_id=int(work["id"]),
                     title=book_title,
                     volume_number=volume_number,
-                    media_type="manga",
+                    media_type="comic",
                     source_type=import_result.source_type,
                     source_path=str(path),
                     page_count=len(import_result.pages),
@@ -77,13 +86,16 @@ def batch_import(
 def _select_importer(
     path: Path,
     epub_importer: Importer,
+    cbz_importer: Importer,
     image_folder_importer: Importer,
 ) -> Importer:
     if path.is_dir():
         return image_folder_importer
     if path.suffix.casefold() == ".epub":
         return epub_importer
-    raise ValueError("unsupported source; expected an .epub file, .txt file, or image folder")
+    if path.suffix.casefold() == ".cbz":
+        return cbz_importer
+    raise ValueError("unsupported source; expected an .epub file, .cbz file, .txt file, or image folder")
 
 
 def _resolve_titles(path: Path, import_result: ImportResult) -> tuple[str, str, int | None]:
@@ -170,3 +182,25 @@ def _create_novel_book(
         status="need_review",
         db_path=db_path,
     )
+
+
+def _save_novel_chapters(
+    book_id: int,
+    novel_result: NovelImportResult,
+    db_path: str | Path,
+) -> None:
+    delete_novel_chapters_by_book(book_id, db_path=db_path)
+    order_index = 1
+    for volume in novel_result.volumes:
+        volume_title = str(getattr(volume, "title", "") or "")
+        for chapter in getattr(volume, "chapters", []):
+            chapter_title = str(getattr(chapter, "title", "") or "正文")
+            title = f"{volume_title} {chapter_title}".strip() if volume_title else chapter_title
+            create_novel_chapter(
+                book_id=book_id,
+                title=title,
+                content=str(getattr(chapter, "content", "") or ""),
+                order_index=order_index,
+                db_path=db_path,
+            )
+            order_index += 1
