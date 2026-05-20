@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from app.storage.database import DEFAULT_DATABASE_PATH, connect
 
@@ -216,6 +217,7 @@ def delete_book(
     db_path: str | Path = DEFAULT_DATABASE_PATH,
 ) -> bool:
     with closing(connect(db_path)) as connection, connection:
+        connection.execute("DELETE FROM ai_suggestions WHERE book_id = ?", (book_id,))
         connection.execute("DELETE FROM novel_chapters WHERE book_id = ?", (book_id,))
         connection.execute("DELETE FROM export_jobs WHERE book_id = ?", (book_id,))
         cursor = connection.execute("DELETE FROM books WHERE id = ?", (book_id,))
@@ -232,6 +234,10 @@ def delete_books(
         return 0
     placeholders = _placeholders(ids)
     with closing(connect(db_path)) as connection, connection:
+        connection.execute(
+            f"DELETE FROM ai_suggestions WHERE book_id IN ({placeholders})",
+            ids,
+        )
         connection.execute(
             f"DELETE FROM novel_chapters WHERE book_id IN ({placeholders})",
             ids,
@@ -374,6 +380,133 @@ def delete_novel_chapters_by_book(
         return cursor.rowcount
 
 
+def create_ai_suggestion(
+    *,
+    book_id: int,
+    provider: str,
+    status: str = "pending",
+    input_snapshot: str | Mapping[str, Any] = "{}",
+    raw_response: str = "",
+    parsed_json: str | Mapping[str, Any] = "{}",
+    confidence: float = 0,
+    error_message: str = "",
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> RowDict:
+    timestamp = _now()
+    with closing(connect(db_path)) as connection, connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO ai_suggestions (
+              book_id, provider, status, input_snapshot, raw_response,
+              parsed_json, confidence, error_message, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                book_id,
+                provider,
+                status,
+                _json_text(input_snapshot),
+                raw_response,
+                _json_text(parsed_json),
+                float(confidence),
+                error_message,
+                timestamp,
+                timestamp,
+            ),
+        )
+        return _get_required_by_id(connection, "ai_suggestions", int(cursor.lastrowid))
+
+
+def update_ai_suggestion(
+    ai_suggestion_id: int,
+    *,
+    book_id: int | None = None,
+    provider: str | None = None,
+    status: str | None = None,
+    input_snapshot: str | Mapping[str, Any] | None = None,
+    raw_response: str | None = None,
+    parsed_json: str | Mapping[str, Any] | None = None,
+    confidence: float | None = None,
+    error_message: str | None = None,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> RowDict | None:
+    updates = _without_none(
+        {
+            "book_id": book_id,
+            "provider": provider,
+            "status": status,
+            "input_snapshot": _json_text(input_snapshot) if input_snapshot is not None else None,
+            "raw_response": raw_response,
+            "parsed_json": _json_text(parsed_json) if parsed_json is not None else None,
+            "confidence": confidence,
+            "error_message": error_message,
+        }
+    )
+    return _update_row("ai_suggestions", ai_suggestion_id, updates, db_path)
+
+
+def get_ai_suggestion(
+    ai_suggestion_id: int,
+    *,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> RowDict | None:
+    with closing(connect(db_path)) as connection, connection:
+        row = connection.execute(
+            "SELECT * FROM ai_suggestions WHERE id = ?",
+            (ai_suggestion_id,),
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def list_ai_suggestions_by_book(
+    book_id: int,
+    *,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> list[RowDict]:
+    with closing(connect(db_path)) as connection, connection:
+        rows = connection.execute(
+            """
+            SELECT * FROM ai_suggestions
+            WHERE book_id = ?
+            ORDER BY id
+            """,
+            (book_id,),
+        ).fetchall()
+        return [_row_to_dict_required(row) for row in rows]
+
+
+def list_latest_ai_suggestion_by_book(
+    book_id: int,
+    *,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> RowDict | None:
+    with closing(connect(db_path)) as connection, connection:
+        row = connection.execute(
+            """
+            SELECT * FROM ai_suggestions
+            WHERE book_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (book_id,),
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def delete_ai_suggestions_by_book(
+    book_id: int,
+    *,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> int:
+    with closing(connect(db_path)) as connection, connection:
+        cursor = connection.execute(
+            "DELETE FROM ai_suggestions WHERE book_id = ?",
+            (book_id,),
+        )
+        return cursor.rowcount
+
+
 def create_export_job(
     *,
     book_id: int,
@@ -487,6 +620,12 @@ def _clean_ids(row_ids: list[int]) -> list[int]:
 
 def _placeholders(values: list[int]) -> str:
     return ", ".join("?" for _ in values)
+
+
+def _json_text(value: str | Mapping[str, Any]) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def _row_to_dict(row: sqlite3.Row | None) -> RowDict | None:

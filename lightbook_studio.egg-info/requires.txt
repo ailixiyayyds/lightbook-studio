@@ -1,6 +1,7 @@
 PySide6>=6.6
 Pillow>=10.0
 beautifulsoup4>=4.12
+ebooklib>=0.18
 
 [dev]
 pytest>=8.0

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from PySide6.QtCore import Qt
 from PySide6.QtCore import QUrl
@@ -13,6 +15,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -36,6 +39,8 @@ from PySide6.QtWidgets import (
 
 from app.core.config import load_config, save_config
 from app.core.models import ComicMetadata, ImportResult, LightBookError, MangaDirection
+from app.ai.mock_provider import MockAiProvider
+from app.ai.suggestion_service import AiSuggestionService
 from app.exporters.cbz_exporter import export_cbz
 from app.exporters.epub_exporter import export_novel_epub
 from app.importers.cbz_importer import import_cbz
@@ -56,6 +61,9 @@ from app.storage.repositories import (
     get_book,
     get_work,
     list_novel_chapters,
+    create_ai_suggestion,
+    get_ai_suggestion,
+    list_latest_ai_suggestion_by_book,
     list_books_by_work,
     list_books,
     list_books_by_status,
@@ -72,6 +80,17 @@ from app.utils.natural_sort import natural_sorted
 logger = logging.getLogger(__name__)
 
 ImporterFunc = Callable[[str | Path], ImportResult]
+AI_APPLY_FIELDS = [
+    ("clean_title", "作品名"),
+    ("book_title", "本卷标题"),
+    ("volume_number", "卷号"),
+    ("authors", "作者"),
+    ("summary", "简介"),
+    ("genres", "分类"),
+    ("tags", "标签"),
+    ("language_iso", "语言"),
+    ("manga_direction", "阅读方向"),
+]
 BATCH_TABLE_COLUMNS = ["类型", "状态", "作品名", "卷号", "页/章数", "来源路径"]
 
 
@@ -88,6 +107,7 @@ class MainWindow(QMainWindow):
         self.batch_cover_override_path: Path | None = None
         self.output_root = Path(self.config.recent_output_dir) if self.config.recent_output_dir else None
         self.current_batch_book_id: int | None = None
+        self.current_ai_suggestion_id: int | None = None
 
         self._create_single_import_widgets()
         self._create_batch_widgets()
@@ -191,9 +211,37 @@ class MainWindow(QMainWindow):
         self.batch_chapter_preview_edit = QTextEdit()
         self.batch_chapter_preview_edit.setReadOnly(True)
         self.batch_chapter_preview_edit.setMinimumHeight(180)
+
+        self.ai_generate_button = QPushButton("生成 AI 建议")
+        self.ai_generate_button.clicked.connect(self._generate_ai_suggestion)
+        self.ai_apply_button = QPushButton("应用选中字段")
+        self.ai_apply_button.clicked.connect(self._apply_selected_ai_fields)
+        self.ai_ignore_button = QPushButton("忽略建议")
+        self.ai_ignore_button.clicked.connect(self._ignore_ai_suggestion)
+        self.ai_status_label = QLabel("AI 只提供建议，不会自动覆盖数据。")
+        self.ai_suggestion_table = QTableWidget(0, 5)
+        self.ai_suggestion_table.setHorizontalHeaderLabels(["字段", "当前值", "AI 建议", "置信度", "应用"])
+        self.ai_suggestion_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.ai_suggestion_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.ai_suggestion_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.ai_suggestion_table.verticalHeader().setVisible(False)
+        self.ai_suggestion_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.ai_suggestion_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._set_novel_chapter_widgets_visible(False)
 
     def _create_settings_widgets(self) -> None:
+        self.ai_provider_label = QLabel("MockAiProvider（默认，不调用网络）")
+        self.ai_base_url_edit = QLineEdit()
+        self.ai_base_url_edit.setPlaceholderText("https://api.openai.com/v1")
+        self.ai_base_url_edit.setToolTip("预留给 OpenAI-compatible provider；当前默认仍使用 MockAiProvider。")
+        self.ai_model_edit = QLineEdit()
+        self.ai_model_edit.setPlaceholderText("填写真实 provider 使用的模型名")
+        self.ai_model_edit.setToolTip("预留字段，当前不会自动启用真实 provider。")
+        self.ai_api_key_edit = QLineEdit()
+        self.ai_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.ai_api_key_edit.setPlaceholderText("从环境变量 LIGHTBOOK_AI_API_KEY 读取，不在此保存")
+        self.ai_api_key_edit.setEnabled(False)
+        self.ai_api_key_status_label = QLabel(_ai_api_key_status_text())
         self.settings_output_label = QLabel("未选择")
 
     def _build_ui(self) -> None:
@@ -330,10 +378,22 @@ class MainWindow(QMainWindow):
         preview_buttons.addWidget(self.batch_preview_epub_button)
         preview_buttons.addWidget(self.batch_open_preview_epub_button)
 
+        ai_buttons = QHBoxLayout()
+        ai_buttons.addWidget(self.ai_generate_button)
+        ai_buttons.addWidget(self.ai_apply_button)
+        ai_buttons.addWidget(self.ai_ignore_button)
+        ai_group = QGroupBox("AI 辅助")
+        ai_layout = QVBoxLayout()
+        ai_layout.addLayout(ai_buttons)
+        ai_layout.addWidget(self.ai_status_label)
+        ai_layout.addWidget(self.ai_suggestion_table)
+        ai_group.setLayout(ai_layout)
+
         form_container = QWidget()
         form_layout = QVBoxLayout()
         form_layout.addLayout(form)
         form_layout.addLayout(action_buttons)
+        form_layout.addWidget(ai_group)
         form_layout.addWidget(self.batch_chapter_label)
         form_layout.addWidget(self.batch_chapter_table)
         form_layout.addWidget(self.batch_chapter_title_label)
@@ -365,6 +425,11 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         form.addRow("输出目录", self.settings_output_label)
         form.addRow("", choose_output_button)
+        form.addRow("AI provider", self.ai_provider_label)
+        form.addRow("AI base_url", self.ai_base_url_edit)
+        form.addRow("AI model", self.ai_model_edit)
+        form.addRow("AI api_key", self.ai_api_key_edit)
+        form.addRow("AI key 状态", self.ai_api_key_status_label)
 
         root = QVBoxLayout()
         root.addLayout(form)
@@ -1093,6 +1158,7 @@ class MainWindow(QMainWindow):
 
         is_novel = _is_novel_db_book(book)
         self.current_batch_book_id = book_id
+        self._clear_ai_suggestion_table()
         self.batch_series_title_edit.setText(str(work.get("title") or ""))
         self.batch_book_title_edit.setText(str(book.get("title") or ""))
         self.batch_volume_number_edit.setText(
@@ -1129,6 +1195,121 @@ class MainWindow(QMainWindow):
             self.batch_cover_override_label.setText("未选择")
             self.batch_cover_preview_label.clear()
             self.batch_cover_preview_label.setText("未选择封面")
+
+    def _generate_ai_suggestion(self) -> None:
+        book_id = self.current_batch_book_id
+        if book_id is None:
+            self._show_error("请先选择一个 book。")
+            return
+        try:
+            service = AiSuggestionService(_GuiAiRepository(), MockAiProvider())
+            service.generate_for_book(book_id)
+            latest = list_latest_ai_suggestion_by_book(book_id)
+            if latest is None:
+                raise LightBookError("AI 建议已生成，但无法从数据库读取。")
+            self.current_ai_suggestion_id = int(latest["id"])
+            self._populate_ai_suggestion_table(latest)
+            self.ai_status_label.setText("AI 建议已生成。请选择需要应用的字段。")
+        except Exception as exc:
+            logger.exception("Failed to generate AI suggestion")
+            self.ai_status_label.setText(f"AI 建议生成失败：{exc}")
+            self._show_error(f"AI 建议生成失败：{exc}")
+
+    def _apply_selected_ai_fields(self) -> None:
+        book_id = self.current_batch_book_id
+        if book_id is None:
+            self._show_error("请先选择一个 book。")
+            return
+        if self.current_ai_suggestion_id is None:
+            self._show_error("请先生成 AI 建议。")
+            return
+
+        fields = self._selected_ai_fields()
+        if not fields:
+            QMessageBox.information(self, "AI 辅助", "没有勾选要应用的字段。")
+            return
+
+        try:
+            service = AiSuggestionService(_GuiAiRepository(), MockAiProvider())
+            service.apply_suggestion(book_id, self.current_ai_suggestion_id, fields)
+        except Exception as exc:
+            logger.exception("Failed to apply AI suggestion")
+            self._show_error(f"应用 AI 建议失败：{exc}")
+            return
+
+        self._refresh_batch_table(selected_book_id=book_id)
+        QMessageBox.information(self, "AI 辅助", "已应用选中字段。")
+
+    def _ignore_ai_suggestion(self) -> None:
+        self._clear_ai_suggestion_table()
+
+    def _clear_ai_suggestion_table(self) -> None:
+        self.current_ai_suggestion_id = None
+        self.ai_suggestion_table.setRowCount(0)
+        self.ai_status_label.setText("AI 只提供建议，不会自动覆盖数据。")
+
+    def _populate_ai_suggestion_table(self, suggestion: RowDict) -> None:
+        parsed = _json_dict(suggestion.get("parsed_json"))
+        field_confidence = parsed.get("field_confidence")
+        if not isinstance(field_confidence, dict):
+            field_confidence = {}
+
+        self.ai_suggestion_table.setRowCount(0)
+        for row_index, (field_name, field_label) in enumerate(AI_APPLY_FIELDS):
+            self.ai_suggestion_table.insertRow(row_index)
+            confidence = field_confidence.get(field_name, parsed.get("confidence", suggestion.get("confidence", 0)))
+            row_values = [
+                field_label,
+                self._current_ai_field_value(field_name),
+                _display_ai_value(parsed.get(field_name)),
+                _display_confidence(confidence),
+            ]
+            for column_index, value in enumerate(row_values):
+                item = QTableWidgetItem(value)
+                item.setData(Qt.ItemDataRole.UserRole, field_name)
+                self.ai_suggestion_table.setItem(row_index, column_index, item)
+
+            apply_item = QTableWidgetItem()
+            apply_item.setFlags(
+                Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsSelectable
+            )
+            apply_item.setCheckState(Qt.CheckState.Unchecked)
+            apply_item.setData(Qt.ItemDataRole.UserRole, field_name)
+            self.ai_suggestion_table.setItem(row_index, 4, apply_item)
+
+    def _selected_ai_fields(self) -> list[str]:
+        fields: list[str] = []
+        for row in range(self.ai_suggestion_table.rowCount()):
+            item = self.ai_suggestion_table.item(row, 4)
+            if item is None or item.checkState() != Qt.CheckState.Checked:
+                continue
+            field_name = item.data(Qt.ItemDataRole.UserRole)
+            if field_name is not None:
+                fields.append(str(field_name))
+        return fields
+
+    def _current_ai_field_value(self, field_name: str) -> str:
+        if field_name == "clean_title":
+            return self.batch_series_title_edit.text()
+        if field_name == "book_title":
+            return self.batch_book_title_edit.text()
+        if field_name == "volume_number":
+            return self.batch_volume_number_edit.text()
+        if field_name == "authors":
+            return self.batch_author_edit.text()
+        if field_name == "summary":
+            return self.batch_summary_edit.toPlainText()
+        if field_name == "genres":
+            return self.batch_genres_edit.text()
+        if field_name == "tags":
+            return self.batch_tags_edit.text()
+        if field_name == "language_iso":
+            return self.batch_language_edit.text()
+        if field_name == "manga_direction":
+            return self.batch_direction_combo.currentText()
+        return ""
 
     def _set_novel_chapter_widgets_visible(self, visible: bool) -> None:
         for widget in (
@@ -1276,6 +1457,7 @@ class MainWindow(QMainWindow):
         self.batch_cover_override_label.setText("未选择")
         self.batch_cover_preview_label.clear()
         self.batch_cover_preview_label.setText("未选择封面")
+        self._clear_ai_suggestion_table()
         self._load_batch_chapters(None)
         self._set_novel_chapter_widgets_visible(False)
 
@@ -1440,8 +1622,68 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "LightBook Studio", message)
 
 
+class _GuiAiRepository:
+    def get_book(self, book_id: int) -> RowDict | None:
+        return get_book(book_id)
+
+    def get_work(self, work_id: int) -> RowDict | None:
+        return get_work(work_id)
+
+    def list_novel_chapters(self, book_id: int) -> list[RowDict]:
+        return list_novel_chapters(book_id)
+
+    def create_ai_suggestion(self, **kwargs: Any) -> RowDict:
+        return create_ai_suggestion(**kwargs)
+
+    def get_ai_suggestion(self, ai_suggestion_id: int) -> RowDict | None:
+        return get_ai_suggestion(ai_suggestion_id)
+
+    def update_work(self, work_id: int, **kwargs: Any) -> RowDict | None:
+        return update_work(work_id, **kwargs)
+
+    def update_book(self, book_id: int, **kwargs: Any) -> RowDict | None:
+        return update_book(book_id, **kwargs)
+
+
 def _preview_epub_path(book_id: int) -> Path:
     return Path("data") / "previews" / str(book_id) / "preview.epub"
+
+
+def _json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _display_ai_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value)
+
+
+def _display_confidence(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    return f"{number:.2f}"
+
+
+def _ai_api_key_status_text() -> str:
+    if os.environ.get("LIGHTBOOK_AI_API_KEY"):
+        return "已从环境变量 LIGHTBOOK_AI_API_KEY 读取（不会保存到项目）。"
+    return "未配置。需要真实 provider 时请设置环境变量 LIGHTBOOK_AI_API_KEY。"
 
 
 def _flatten_novel_import_chapters(import_result: NovelImportResult) -> list[NovelChapter]:

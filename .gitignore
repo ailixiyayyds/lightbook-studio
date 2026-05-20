@@ -6,5 +6,6 @@ __pycache__/
 data/
 *.db
 config.json
+.env
 .venv/
 .claude/

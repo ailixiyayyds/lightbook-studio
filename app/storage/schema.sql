@@ -57,6 +57,21 @@ CREATE TABLE IF NOT EXISTS novel_chapters (
   FOREIGN KEY(book_id) REFERENCES books(id)
 );
 
+CREATE TABLE IF NOT EXISTS ai_suggestions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id INTEGER NOT NULL,
+  provider TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  input_snapshot TEXT NOT NULL DEFAULT '{}',
+  raw_response TEXT NOT NULL DEFAULT '',
+  parsed_json TEXT NOT NULL DEFAULT '{}',
+  confidence REAL DEFAULT 0,
+  error_message TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(book_id) REFERENCES books(id)
+);
+
 CREATE TABLE IF NOT EXISTS app_settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -65,5 +80,7 @@ CREATE TABLE IF NOT EXISTS app_settings (
 CREATE INDEX IF NOT EXISTS idx_books_work_id ON books(work_id);
 CREATE INDEX IF NOT EXISTS idx_books_status ON books(status);
 CREATE INDEX IF NOT EXISTS idx_novel_chapters_book_id ON novel_chapters(book_id);
+CREATE INDEX IF NOT EXISTS idx_ai_suggestions_book_id ON ai_suggestions(book_id);
+CREATE INDEX IF NOT EXISTS idx_ai_suggestions_status ON ai_suggestions(status);
 CREATE INDEX IF NOT EXISTS idx_export_jobs_book_id ON export_jobs(book_id);
 CREATE INDEX IF NOT EXISTS idx_export_jobs_status ON export_jobs(status);

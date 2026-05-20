@@ -40,8 +40,11 @@ def _migrate_database(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "books", "export_format", "TEXT DEFAULT ''")
     _ensure_column(connection, "books", "cover_override_path", "TEXT DEFAULT ''")
     _ensure_novel_chapters_table(connection)
+    _ensure_ai_suggestions_table(connection)
     _ensure_index(connection, "idx_books_media_type", "books", "media_type")
     _ensure_index(connection, "idx_novel_chapters_book_id", "novel_chapters", "book_id")
+    _ensure_index(connection, "idx_ai_suggestions_book_id", "ai_suggestions", "book_id")
+    _ensure_index(connection, "idx_ai_suggestions_status", "ai_suggestions", "status")
 
 
 def _ensure_column(
@@ -80,6 +83,27 @@ def _ensure_novel_chapters_table(connection: sqlite3.Connection) -> None:
           title TEXT NOT NULL,
           content TEXT NOT NULL,
           order_index INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(book_id) REFERENCES books(id)
+        )
+        """
+    )
+
+
+def _ensure_ai_suggestions_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_suggestions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          book_id INTEGER NOT NULL,
+          provider TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          input_snapshot TEXT NOT NULL DEFAULT '{}',
+          raw_response TEXT NOT NULL DEFAULT '',
+          parsed_json TEXT NOT NULL DEFAULT '{}',
+          confidence REAL DEFAULT 0,
+          error_message TEXT NOT NULL DEFAULT '',
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
           FOREIGN KEY(book_id) REFERENCES books(id)

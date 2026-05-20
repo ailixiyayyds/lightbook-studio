@@ -74,6 +74,12 @@ lightbook-studio
 pytest
 ```
 
+如果遇到 `PytestCacheWarning`，清理缓存目录后重试：
+
+```powershell
+Remove-Item -Recurse -Force .pytest_cache
+```
+
 ## 技术栈
 
 | 层面 | 技术 |
