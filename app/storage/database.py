@@ -32,8 +32,13 @@ def connect(db_path: str | Path = DEFAULT_DATABASE_PATH) -> sqlite3.Connection:
 
 
 def _migrate_database(connection: sqlite3.Connection) -> None:
+    _ensure_column(connection, "books", "media_type", "TEXT NOT NULL DEFAULT 'manga'")
     _ensure_column(connection, "books", "translator", "TEXT DEFAULT ''")
     _ensure_column(connection, "books", "manga_direction", "TEXT DEFAULT 'rtl'")
+    _ensure_column(connection, "books", "chapter_count", "INTEGER DEFAULT 0")
+    _ensure_column(connection, "books", "text_length", "INTEGER DEFAULT 0")
+    _ensure_column(connection, "books", "export_format", "TEXT NOT NULL DEFAULT 'cbz'")
+    _ensure_index(connection, "idx_books_media_type", "books", "media_type")
 
 
 def _ensure_column(
@@ -50,3 +55,14 @@ def _ensure_column(
         connection.execute(
             f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
         )
+
+
+def _ensure_index(
+    connection: sqlite3.Connection,
+    index_name: str,
+    table_name: str,
+    column_name: str,
+) -> None:
+    connection.execute(
+        f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name}({column_name})"
+    )

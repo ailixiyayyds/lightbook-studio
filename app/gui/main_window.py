@@ -39,6 +39,8 @@ from app.core.models import ComicMetadata, ImportResult, LightBookError, MangaDi
 from app.exporters.cbz_exporter import export_cbz
 from app.importers.comic_epub_importer import import_comic_epub
 from app.importers.image_folder_importer import import_image_folder
+from app.importers.novel_txt_importer import NovelImportResult, import_novel_txt
+from app.services.batch_export_service import export_book_from_database
 from app.services.batch_import_service import batch_import
 from app.storage.repositories import (
     RowDict,
@@ -55,12 +57,13 @@ from app.storage.repositories import (
     update_work,
 )
 from app.utils.filename_parser import parse_comic_filename
+from app.utils.filename import sanitize_windows_filename
 from app.utils.natural_sort import natural_sorted
 
 logger = logging.getLogger(__name__)
 
 ImporterFunc = Callable[[str | Path], ImportResult]
-BATCH_TABLE_COLUMNS = ["状态", "作品名", "卷号", "页数", "来源路径"]
+BATCH_TABLE_COLUMNS = ["类型", "状态", "作品名", "卷号", "页/章数", "来源路径"]
 
 
 class MainWindow(QMainWindow):
@@ -119,7 +122,7 @@ class MainWindow(QMainWindow):
         self.batch_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.batch_table.verticalHeader().setVisible(False)
         self.batch_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.batch_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.batch_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.batch_table.itemSelectionChanged.connect(self._on_batch_selection_changed)
         self.batch_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.batch_table.customContextMenuRequested.connect(self._show_batch_context_menu)
@@ -202,10 +205,16 @@ class MainWindow(QMainWindow):
     def _build_batch_tab(self) -> QWidget:
         choose_epubs_button = QPushButton("选择多个 EPUB")
         choose_epubs_button.clicked.connect(self._batch_choose_epubs)
+        choose_txt_button = QPushButton("选择 TXT 文件")
+        choose_txt_button.clicked.connect(self._batch_choose_txt)
+        choose_txts_button = QPushButton("选择多个 TXT 文件")
+        choose_txts_button.clicked.connect(self._batch_choose_txts)
         choose_folders_button = QPushButton("选择多个图片文件夹")
         choose_folders_button.clicked.connect(self._batch_choose_image_folders)
         scan_epubs_button = QPushButton("扫描目录中的 EPUB")
         scan_epubs_button.clicked.connect(self._batch_scan_epubs)
+        scan_txts_button = QPushButton("扫描目录中的 TXT")
+        scan_txts_button.clicked.connect(self._batch_scan_txts)
         refresh_button = QPushButton("刷新")
         refresh_button.clicked.connect(self._refresh_batch_table)
         delete_selected_button = QPushButton("删除选中")
@@ -213,8 +222,11 @@ class MainWindow(QMainWindow):
 
         top_buttons = QHBoxLayout()
         top_buttons.addWidget(choose_epubs_button)
+        top_buttons.addWidget(choose_txt_button)
+        top_buttons.addWidget(choose_txts_button)
         top_buttons.addWidget(choose_folders_button)
         top_buttons.addWidget(scan_epubs_button)
+        top_buttons.addWidget(scan_txts_button)
         top_buttons.addStretch()
         top_buttons.addWidget(delete_selected_button)
         top_buttons.addWidget(refresh_button)
@@ -423,6 +435,28 @@ class MainWindow(QMainWindow):
         if files:
             self._run_batch_import([Path(file_path) for file_path in files])
 
+    def _batch_choose_txt(self) -> None:
+        start_dir = self.config.recent_input_dir or str(Path.home())
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 TXT 文件",
+            start_dir,
+            "TXT Files (*.txt);;All Files (*)",
+        )
+        if file_path:
+            self._run_batch_import([Path(file_path)])
+
+    def _batch_choose_txts(self) -> None:
+        start_dir = self.config.recent_input_dir or str(Path.home())
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "选择多个 TXT 文件",
+            start_dir,
+            "TXT Files (*.txt);;All Files (*)",
+        )
+        if files:
+            self._run_batch_import([Path(file_path) for file_path in files])
+
     def _batch_choose_image_folders(self) -> None:
         folders = self._choose_multiple_directories()
         if folders:
@@ -440,6 +474,21 @@ class MainWindow(QMainWindow):
         )
         if not paths:
             QMessageBox.information(self, "批量整理", "没有找到 EPUB 文件。")
+            return
+        self._run_batch_import(paths)
+
+    def _batch_scan_txts(self) -> None:
+        start_dir = self.config.recent_input_dir or str(Path.home())
+        folder = QFileDialog.getExistingDirectory(self, "扫描目录中的 TXT", start_dir)
+        if not folder:
+            return
+        root = Path(folder)
+        paths = natural_sorted(
+            [path for path in root.rglob("*") if path.is_file() and path.suffix.casefold() == ".txt"],
+            key=lambda path: str(path),
+        )
+        if not paths:
+            QMessageBox.information(self, "批量整理", "没有找到 TXT 文件。")
             return
         self._run_batch_import(paths)
 
@@ -473,11 +522,25 @@ class MainWindow(QMainWindow):
         self._refresh_batch_table(selected_book_id=selected_book_id)
 
         message = f"导入成功：{result.imported_count}\n导入失败：{result.failed_count}"
+        warnings = self._batch_import_warnings(result.book_ids)
         if result.errors:
-            message += "\n\n" + "\n".join(result.errors[:10])
+            message += "\n\n" + "\n".join(_format_batch_error(error) for error in result.errors[:10])
+        if warnings:
+            message += "\n\n" + "\n".join(warnings[:10])
+        if result.errors or warnings:
             QMessageBox.warning(self, "批量整理", message)
         else:
             QMessageBox.information(self, "批量整理", message)
+
+    def _batch_import_warnings(self, book_ids: list[int]) -> list[str]:
+        warnings: list[str] = []
+        for book_id in book_ids:
+            book = get_book(book_id)
+            if book is None or not _is_novel_db_book(book):
+                continue
+            if int(book.get("chapter_count") or 0) == 0:
+                warnings.append(f"没识别到章节：{book.get('source_path')}")
+        return warnings
 
     def _refresh_batch_table(self, selected_book_id: int | None = None) -> None:
         current_book_id = selected_book_id or self.current_batch_book_id
@@ -493,12 +556,14 @@ class MainWindow(QMainWindow):
         selected_row = -1
         for row_index, book in enumerate(books):
             work = get_work(int(book["work_id"])) or {}
+            count_value = book.get("chapter_count") if _is_novel_db_book(book) else book.get("page_count")
             self.batch_table.insertRow(row_index)
             row_values = [
+                _book_media_type(book),
                 str(book.get("status") or ""),
                 str(work.get("title") or ""),
                 "" if book.get("volume_number") is None else str(book.get("volume_number")),
-                str(book.get("page_count") or 0),
+                str(count_value or 0),
                 str(book.get("source_path") or ""),
             ]
             for column_index, value in enumerate(row_values):
@@ -626,23 +691,52 @@ class MainWindow(QMainWindow):
 
         try:
             source_path = Path(str(book["source_path"]))
-            import_result = self._import_result_for_book(book)
-            series_title, book_title, volume_number = _resolve_titles_from_import(
-                source_path,
-                import_result,
-            )
-            work = self._work_for_reparsed_book(int(book["work_id"]), series_title, import_result)
-            update_book(
-                book_id,
-                work_id=int(work["id"]),
-                title=book_title,
-                volume_number=volume_number,
-                source_type=import_result.source_type,
-                page_count=len(import_result.pages),
-                translator=import_result.metadata.translator,
-                manga_direction=import_result.metadata.manga_direction,
-                status="need_review",
-            )
+            if _is_novel_db_book(book):
+                novel_result = import_novel_txt(source_path)
+                series_title, book_title, volume_number = _resolve_titles_from_novel_import(
+                    source_path,
+                    novel_result,
+                )
+                work = self._work_for_reparsed_novel_book(
+                    int(book["work_id"]),
+                    series_title,
+                    novel_result,
+                )
+                update_book(
+                    book_id,
+                    work_id=int(work["id"]),
+                    title=book_title,
+                    volume_number=volume_number,
+                    media_type="novel",
+                    source_type="novel_txt",
+                    page_count=0,
+                    chapter_count=novel_result.chapter_count,
+                    text_length=novel_result.text_length,
+                    export_format="epub",
+                    status="need_review",
+                )
+            else:
+                import_result = self._import_result_for_book(book)
+                series_title, book_title, volume_number = _resolve_titles_from_import(
+                    source_path,
+                    import_result,
+                )
+                work = self._work_for_reparsed_book(int(book["work_id"]), series_title, import_result)
+                update_book(
+                    book_id,
+                    work_id=int(work["id"]),
+                    title=book_title,
+                    volume_number=volume_number,
+                    media_type="manga",
+                    source_type=import_result.source_type,
+                    page_count=len(import_result.pages),
+                    chapter_count=0,
+                    text_length=0,
+                    export_format="cbz",
+                    translator=import_result.metadata.translator,
+                    manga_direction=import_result.metadata.manga_direction,
+                    status="need_review",
+                )
         except Exception as exc:
             logger.exception("Failed to reparse batch book")
             try:
@@ -683,6 +777,29 @@ class MainWindow(QMainWindow):
         )
         return updated or get_work(work_id) or {"id": work_id, "title": series_title}
 
+    def _work_for_reparsed_novel_book(
+        self,
+        current_work_id: int,
+        series_title: str,
+        import_result: NovelImportResult,
+    ) -> RowDict:
+        existing = _find_work_by_title(series_title)
+        if existing is not None:
+            work_id = int(existing["id"])
+        elif len(list_books_by_work(current_work_id)) <= 1:
+            work_id = current_work_id
+        else:
+            work = create_work(title=series_title)
+            work_id = int(work["id"])
+
+        updated = update_work(
+            work_id,
+            title=series_title,
+            author=import_result.author_guess,
+            language_iso="zh",
+        )
+        return updated or get_work(work_id) or {"id": work_id, "title": series_title}
+
     def _load_batch_book(self, book_id: int | None) -> None:
         if book_id is None:
             return
@@ -695,6 +812,7 @@ class MainWindow(QMainWindow):
             self._show_error("找不到 book 对应的 work。")
             return
 
+        is_novel = _is_novel_db_book(book)
         self.current_batch_book_id = book_id
         self.batch_series_title_edit.setText(str(work.get("title") or ""))
         self.batch_book_title_edit.setText(str(book.get("title") or ""))
@@ -710,6 +828,12 @@ class MainWindow(QMainWindow):
         direction = str(book.get("manga_direction") or "rtl")
         index = self.batch_direction_combo.findText(direction)
         self.batch_direction_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.batch_translator_edit.setEnabled(not is_novel)
+        self.batch_direction_combo.setEnabled(not is_novel)
+        if is_novel:
+            self.batch_direction_combo.setToolTip("轻小说导出 EPUB，不使用漫画阅读方向。")
+        else:
+            self.batch_direction_combo.setToolTip("")
 
     def _clear_batch_form(self) -> None:
         self.batch_series_title_edit.clear()
@@ -722,6 +846,9 @@ class MainWindow(QMainWindow):
         self.batch_tags_edit.clear()
         self.batch_language_edit.setText("zh")
         self.batch_direction_combo.setCurrentIndex(0)
+        self.batch_translator_edit.setEnabled(True)
+        self.batch_direction_combo.setEnabled(True)
+        self.batch_direction_combo.setToolTip("")
 
     def _save_batch_metadata(self, show_message: bool = True) -> bool:
         if self.current_batch_book_id is None:
@@ -740,6 +867,7 @@ class MainWindow(QMainWindow):
             )
             series_title = self.batch_series_title_edit.text().strip() or "Untitled"
             book_title = self.batch_book_title_edit.text().strip() or series_title
+            is_novel = _is_novel_db_book(book)
             update_work(
                 int(book["work_id"]),
                 title=series_title,
@@ -749,14 +877,27 @@ class MainWindow(QMainWindow):
                 tags=self.batch_tags_edit.text().strip(),
                 language_iso=self.batch_language_edit.text().strip() or "zh",
             )
-            update_book(
-                self.current_batch_book_id,
-                title=book_title,
-                volume_number=volume_number,
-                translator=self.batch_translator_edit.text().strip(),
-                manga_direction=self.batch_direction_combo.currentText(),
-                status="ready",
-            )
+            if is_novel:
+                update_book(
+                    self.current_batch_book_id,
+                    title=book_title,
+                    volume_number=volume_number,
+                    media_type="novel",
+                    source_type="novel_txt",
+                    export_format="epub",
+                    status="ready",
+                )
+            else:
+                update_book(
+                    self.current_batch_book_id,
+                    title=book_title,
+                    volume_number=volume_number,
+                    media_type="manga",
+                    export_format="cbz",
+                    translator=self.batch_translator_edit.text().strip(),
+                    manga_direction=self.batch_direction_combo.currentText(),
+                    status="ready",
+                )
         except LightBookError as exc:
             self._show_error(str(exc))
             return False
@@ -818,17 +959,15 @@ class MainWindow(QMainWindow):
             update_book(book_id, status="failed")
             return f"book {book_id}: 找不到对应 work"
 
+        is_novel = _is_novel_db_book(book)
         try:
-            import_result = self._import_result_for_book(book)
-            metadata = self._metadata_for_batch_export(book, work)
-            result = export_cbz(import_result, self.output_root or Path("."), metadata)
-            update_book(book_id, status="exported")
-            logger.info("Batch exported book %s to %s", book_id, result.cbz_path)
+            output_path = export_book_from_database(book_id, self.output_root or Path("."))
+            logger.info("Batch exported book %s to %s", book_id, output_path)
             return None
         except Exception as exc:
             logger.exception("Batch export failed for book %s", book_id)
             update_book(book_id, status="failed")
-            return f"{book.get('source_path')}: {exc}"
+            return _format_export_error(book, exc, is_novel)
 
     def _import_result_for_book(self, book: RowDict) -> ImportResult:
         source_path = Path(str(book["source_path"]))
@@ -885,6 +1024,54 @@ def _resolve_titles_from_import(
         or series_title
     )
     return series_title, book_title, parsed.volume_number
+
+
+def _resolve_titles_from_novel_import(
+    source_path: Path,
+    import_result: NovelImportResult,
+) -> tuple[str, str, int | None]:
+    series_title = import_result.title_guess.strip() or "未命名轻小说"
+    first_volume = import_result.volumes[0] if import_result.volumes else None
+    book_title = (
+        (first_volume.title.strip() if first_volume else "")
+        or sanitize_windows_filename(source_path.stem)
+        or series_title
+    )
+    volume_number = first_volume.volume_number if first_volume else None
+    return series_title, book_title, volume_number
+
+
+def _is_novel_db_book(book: RowDict) -> bool:
+    return (
+        str(book.get("media_type") or "") == "novel"
+        or str(book.get("export_format") or "") == "epub"
+        or str(book.get("source_type") or "") == "novel_txt"
+    )
+
+
+def _book_media_type(book: RowDict) -> str:
+    return "novel" if _is_novel_db_book(book) else "comic"
+
+
+def _format_batch_error(error: str) -> str:
+    if ".txt" in error.casefold() and _looks_like_decode_error(error):
+        return f"TXT 解码失败：{error}"
+    return error
+
+
+def _format_export_error(book: RowDict, exc: Exception, is_novel: bool) -> str:
+    source_path = str(book.get("source_path") or "")
+    message = str(exc)
+    if is_novel and _looks_like_decode_error(message):
+        return f"TXT 解码失败：{source_path}: {message}"
+    if is_novel:
+        return f"EPUB 导出失败：{source_path}: {message}"
+    return f"{source_path}: {message}"
+
+
+def _looks_like_decode_error(value: str) -> bool:
+    lowered = value.casefold()
+    return "无法解码" in value or "decode" in lowered or "unicodedecodeerror" in lowered
 
 
 def _find_work_by_title(title: str) -> RowDict | None:

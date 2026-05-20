@@ -7,11 +7,14 @@ from pathlib import Path
 from app.core.models import ImportResult
 from app.importers.comic_epub_importer import import_comic_epub
 from app.importers.image_folder_importer import import_image_folder
+from app.importers.novel_txt_importer import NovelImportResult, import_novel_txt
 from app.storage.database import DEFAULT_DATABASE_PATH
 from app.storage.repositories import create_book, create_work, list_works
 from app.utils.filename_parser import parse_comic_filename
+from app.utils.filename import sanitize_windows_filename
 
 Importer = Callable[[str | Path], ImportResult]
+NovelImporter = Callable[[str | Path], NovelImportResult]
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,7 @@ def batch_import(
     db_path: str | Path = DEFAULT_DATABASE_PATH,
     epub_importer: Importer = import_comic_epub,
     image_folder_importer: Importer = import_image_folder,
+    novel_txt_importer: NovelImporter = import_novel_txt,
 ) -> BatchImportResult:
     errors: list[str] = []
     book_ids: list[int] = []
@@ -36,22 +40,28 @@ def batch_import(
     for source_path in paths:
         path = Path(source_path)
         try:
-            importer = _select_importer(path, epub_importer, image_folder_importer)
-            import_result = importer(path)
-            series_title, book_title, volume_number = _resolve_titles(path, import_result)
-            work = _get_or_create_work(series_title, import_result, work_cache, db_path)
-            book = create_book(
-                work_id=int(work["id"]),
-                title=book_title,
-                volume_number=volume_number,
-                source_type=import_result.source_type,
-                source_path=str(path),
-                page_count=len(import_result.pages),
-                translator=import_result.metadata.translator,
-                manga_direction=import_result.metadata.manga_direction,
-                status="need_review",
-                db_path=db_path,
-            )
+            if path.suffix.casefold() == ".txt" and not path.is_dir():
+                novel_result = novel_txt_importer(path)
+                book = _create_novel_book(path, novel_result, work_cache, db_path)
+            else:
+                importer = _select_importer(path, epub_importer, image_folder_importer)
+                import_result = importer(path)
+                series_title, book_title, volume_number = _resolve_titles(path, import_result)
+                work = _get_or_create_work(series_title, import_result, work_cache, db_path)
+                book = create_book(
+                    work_id=int(work["id"]),
+                    title=book_title,
+                    volume_number=volume_number,
+                    media_type="manga",
+                    source_type=import_result.source_type,
+                    source_path=str(path),
+                    page_count=len(import_result.pages),
+                    export_format="cbz",
+                    translator=import_result.metadata.translator,
+                    manga_direction=import_result.metadata.manga_direction,
+                    status="need_review",
+                    db_path=db_path,
+                )
             book_ids.append(int(book["id"]))
         except Exception as exc:
             errors.append(f"{path}: {exc}")
@@ -73,7 +83,7 @@ def _select_importer(
         return image_folder_importer
     if path.suffix.casefold() == ".epub":
         return epub_importer
-    raise ValueError("unsupported source; expected an .epub file or image folder")
+    raise ValueError("unsupported source; expected an .epub file, .txt file, or image folder")
 
 
 def _resolve_titles(path: Path, import_result: ImportResult) -> tuple[str, str, int | None]:
@@ -121,3 +131,42 @@ def _get_or_create_work(
     )
     work_cache[series_title] = work
     return work
+
+
+def _create_novel_book(
+    path: Path,
+    novel_result: NovelImportResult,
+    work_cache: dict[str, dict[str, object]],
+    db_path: str | Path,
+) -> dict[str, object]:
+    series_title = novel_result.title_guess.strip() or "未命名轻小说"
+    first_volume = novel_result.volumes[0] if novel_result.volumes else None
+    book_title = (
+        (first_volume.title.strip() if first_volume else "")
+        or sanitize_windows_filename(path.stem)
+    )
+    volume_number = first_volume.volume_number if first_volume else None
+    existing = work_cache.get(series_title)
+    if existing is None:
+        existing = create_work(
+            title=series_title,
+            author=novel_result.author_guess,
+            language_iso="zh",
+            db_path=db_path,
+        )
+        work_cache[series_title] = existing
+
+    return create_book(
+        work_id=int(existing["id"]),
+        title=book_title,
+        volume_number=volume_number,
+        media_type="novel",
+        source_type="novel_txt",
+        source_path=str(path),
+        page_count=0,
+        chapter_count=novel_result.chapter_count,
+        text_length=novel_result.text_length,
+        export_format="epub",
+        status="need_review",
+        db_path=db_path,
+    )

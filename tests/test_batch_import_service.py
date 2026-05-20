@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.core.models import ComicMetadata, ComicPage, ImportResult
+from app.importers.novel_txt_importer import NovelImportResult
 from app.services.batch_import_service import batch_import
 from app.storage.repositories import get_book, list_books, list_works
+from app.utils.novel_chapter_parser import NovelChapter, NovelVolume
 
 
 def test_batch_import_creates_books_and_reuses_work(tmp_path: Path) -> None:
@@ -64,7 +66,7 @@ def test_batch_import_uses_importer_metadata_when_filename_has_no_series(tmp_pat
 def test_batch_import_records_errors_without_stopping_batch(tmp_path: Path) -> None:
     db_path = tmp_path / "lightbook.db"
     good_path = tmp_path / "Good Series v01.epub"
-    bad_path = tmp_path / "notes.txt"
+    bad_path = tmp_path / "notes.pdf"
 
     result = batch_import(
         [bad_path, good_path],
@@ -104,6 +106,69 @@ def test_batch_import_records_importer_failure_and_continues(tmp_path: Path) -> 
     assert len(list_books(db_path=db_path)) == 1
 
 
+def test_batch_import_creates_novel_book_from_txt(tmp_path: Path) -> None:
+    db_path = tmp_path / "lightbook.db"
+    txt_path = tmp_path / "3159 gbk.txt"
+
+    result = batch_import(
+        [txt_path],
+        db_path=db_path,
+        epub_importer=_mock_epub_importer(page_count=1, metadata_title="Ignored"),
+        image_folder_importer=_mock_folder_importer(page_count=1),
+        novel_txt_importer=_mock_novel_importer(
+            title_guess="Novel Series",
+            volume_title="第一卷",
+            volume_number=1,
+            chapter_count=2,
+            text_length=1200,
+        ),
+    )
+
+    assert result.imported_count == 1
+    assert result.failed_count == 0
+
+    work = list_works(db_path=db_path)[0]
+    book = get_book(result.book_ids[0], db_path=db_path)
+    assert book is not None
+    assert work["title"] == "Novel Series"
+    assert book["work_id"] == work["id"]
+    assert book["title"] == "第一卷"
+    assert book["volume_number"] == 1
+    assert book["media_type"] == "novel"
+    assert book["source_type"] == "novel_txt"
+    assert book["status"] == "need_review"
+    assert book["page_count"] == 0
+    assert book["chapter_count"] == 2
+    assert book["text_length"] == 1200
+    assert book["export_format"] == "epub"
+
+
+def test_batch_import_novel_uses_fallback_title_and_filename(tmp_path: Path) -> None:
+    db_path = tmp_path / "lightbook.db"
+    txt_path = tmp_path / "139089 utf8.txt"
+
+    result = batch_import(
+        [txt_path],
+        db_path=db_path,
+        epub_importer=_mock_epub_importer(page_count=1, metadata_title="Ignored"),
+        image_folder_importer=_mock_folder_importer(page_count=1),
+        novel_txt_importer=_mock_novel_importer(
+            title_guess="",
+            volume_title="",
+            volume_number=None,
+            chapter_count=1,
+            text_length=500,
+        ),
+    )
+
+    work = list_works(db_path=db_path)[0]
+    book = get_book(result.book_ids[0], db_path=db_path)
+    assert book is not None
+    assert work["title"] == "未命名轻小说"
+    assert book["title"] == "139089 utf8"
+    assert book["volume_number"] is None
+
+
 def _mock_epub_importer(page_count: int, metadata_title: str):
     def importer(path: str | Path) -> ImportResult:
         return _import_result(Path(path), "epub", page_count, metadata_title)
@@ -114,6 +179,36 @@ def _mock_epub_importer(page_count: int, metadata_title: str):
 def _mock_folder_importer(page_count: int):
     def importer(path: str | Path) -> ImportResult:
         return _import_result(Path(path), "image_folder", page_count, Path(path).name)
+
+    return importer
+
+
+def _mock_novel_importer(
+    *,
+    title_guess: str,
+    volume_title: str,
+    volume_number: int | None,
+    chapter_count: int,
+    text_length: int,
+):
+    def importer(path: str | Path) -> NovelImportResult:
+        chapters = [
+            NovelChapter(title=f"第{index}章", content="正文", index=index)
+            for index in range(1, chapter_count + 1)
+        ]
+        volumes = [NovelVolume(title=volume_title, volume_number=volume_number, chapters=chapters)]
+        return NovelImportResult(
+            source_path=Path(path),
+            source_file_id=None,
+            source_book_id=None,
+            encoding="utf-8",
+            title_guess=title_guess,
+            author_guess="Author",
+            volumes=volumes,
+            text_length=text_length,
+            chapter_count=chapter_count,
+            warnings=[],
+        )
 
     return importer
 

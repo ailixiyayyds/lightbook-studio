@@ -9,6 +9,7 @@ from typing import Any
 from app.storage.database import DEFAULT_DATABASE_PATH, connect
 
 RowDict = dict[str, Any]
+_UNSET = object()
 
 
 def create_work(
@@ -109,7 +110,11 @@ def create_book(
     source_path: str,
     title: str = "",
     volume_number: int | None = None,
+    media_type: str = "manga",
     page_count: int = 0,
+    chapter_count: int = 0,
+    text_length: int = 0,
+    export_format: str = "cbz",
     cover_path: str = "",
     translator: str = "",
     manga_direction: str = "rtl",
@@ -121,19 +126,24 @@ def create_book(
         cursor = connection.execute(
             """
             INSERT INTO books (
-              work_id, title, volume_number, source_type, source_path,
-              page_count, cover_path, translator, manga_direction,
+              work_id, title, volume_number, media_type, source_type, source_path,
+              page_count, chapter_count, text_length, export_format,
+              cover_path, translator, manga_direction,
               status, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 work_id,
                 title,
                 volume_number,
+                media_type,
                 source_type,
                 source_path,
                 page_count,
+                chapter_count,
+                text_length,
+                export_format,
                 cover_path,
                 translator,
                 manga_direction,
@@ -150,10 +160,14 @@ def update_book(
     *,
     work_id: int | None = None,
     title: str | None = None,
-    volume_number: int | None = None,
+    volume_number: int | None | object = _UNSET,
+    media_type: str | None = None,
     source_type: str | None = None,
     source_path: str | None = None,
     page_count: int | None = None,
+    chapter_count: int | None = None,
+    text_length: int | None = None,
+    export_format: str | None = None,
     cover_path: str | None = None,
     translator: str | None = None,
     manga_direction: str | None = None,
@@ -164,16 +178,21 @@ def update_book(
         {
             "work_id": work_id,
             "title": title,
-            "volume_number": volume_number,
+            "media_type": media_type,
             "source_type": source_type,
             "source_path": source_path,
             "page_count": page_count,
+            "chapter_count": chapter_count,
+            "text_length": text_length,
+            "export_format": export_format,
             "cover_path": cover_path,
             "translator": translator,
             "manga_direction": manga_direction,
             "status": status,
         }
     )
+    if volume_number is not _UNSET:
+        updates["volume_number"] = volume_number
     return _update_row("books", book_id, updates, db_path)
 
 

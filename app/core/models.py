@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal
 
 
-SourceType = Literal["image_folder", "epub"]
+SourceType = Literal["image_folder", "epub", "novel_txt"]
 MangaDirection = Literal["rtl", "ltr", "webtoon"]
 
 
