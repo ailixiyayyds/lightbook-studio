@@ -1,0 +1,2 @@
+"""LightBook Studio application package."""
+

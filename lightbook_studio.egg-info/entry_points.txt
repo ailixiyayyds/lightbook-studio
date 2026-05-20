@@ -1,0 +1,2 @@
+[console_scripts]
+lightbook-studio = app.main:main

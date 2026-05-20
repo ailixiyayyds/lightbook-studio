@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+import logging
+import zipfile
+from pathlib import Path
+
+from app.core.models import ComicMetadata, ComicPage, ExportResult, ExporterError, ImportResult
+from app.exporters.comicinfo_writer import build_comicinfo_xml
+from app.utils.filename import sanitize_windows_filename, unique_path
+from app.utils.image_utils import normalize_image_extension, write_poster_jpeg
+
+logger = logging.getLogger(__name__)
+
+
+def export_cbz(
+    import_result: ImportResult,
+    output_root: str | Path,
+    metadata: ComicMetadata | None = None,
+) -> ExportResult:
+    if not import_result.pages:
+        raise ExporterError("没有可导出的页面。")
+
+    metadata_to_write = metadata or import_result.metadata
+    series_title = metadata_to_write.series_title or import_result.metadata.series_title or "Untitled"
+    safe_series_title = sanitize_windows_filename(series_title)
+    volume_number = int(metadata_to_write.volume_number or 1)
+
+    series_dir = Path(output_root) / "Manga" / safe_series_title
+    series_dir.mkdir(parents=True, exist_ok=True)
+    cbz_path = unique_path(series_dir / f"{safe_series_title} v{volume_number:02d}.cbz")
+    poster_path = series_dir / "poster.jpg"
+
+    try:
+        comicinfo_xml = build_comicinfo_xml(metadata_to_write)
+        with zipfile.ZipFile(cbz_path, "w", compression=zipfile.ZIP_DEFLATED) as cbz:
+            cbz.writestr("ComicInfo.xml", comicinfo_xml)
+            if import_result.source_type == "epub":
+                _write_epub_pages(cbz, import_result)
+            else:
+                _write_file_pages(cbz, import_result.pages)
+
+        cover_bytes = _read_page_bytes(import_result, import_result.pages[0])
+        write_poster_jpeg(cover_bytes, poster_path)
+    except OSError as exc:
+        raise ExporterError(f"导出失败：{exc}") from exc
+    except zipfile.BadZipFile as exc:
+        raise ExporterError(f"读取 EPUB 源文件失败：{exc}") from exc
+    except Exception as exc:
+        if isinstance(exc, ExporterError):
+            raise
+        raise ExporterError(f"导出失败：{exc}") from exc
+
+    logger.info("Exported CBZ to %s", cbz_path)
+    return ExportResult(
+        cbz_path=cbz_path,
+        poster_path=poster_path,
+        warnings=import_result.warnings.copy(),
+    )
+
+
+def _write_file_pages(cbz: zipfile.ZipFile, pages: list[ComicPage]) -> None:
+    for index, page in enumerate(pages, start=1):
+        if page.source_path is None:
+            raise ExporterError(f"页面缺少源文件路径：{page.display_name}")
+        cbz.writestr(_cbz_page_name(index, page), page.source_path.read_bytes())
+
+
+def _write_epub_pages(cbz: zipfile.ZipFile, import_result: ImportResult) -> None:
+    with zipfile.ZipFile(import_result.source_path) as source_zip:
+        for index, page in enumerate(import_result.pages, start=1):
+            if not page.archive_path:
+                raise ExporterError(f"页面缺少 EPUB 内部路径：{page.display_name}")
+            cbz.writestr(_cbz_page_name(index, page), source_zip.read(page.archive_path))
+
+
+def _read_page_bytes(import_result: ImportResult, page: ComicPage) -> bytes:
+    if import_result.source_type == "epub":
+        if not page.archive_path:
+            raise ExporterError(f"页面缺少 EPUB 内部路径：{page.display_name}")
+        with zipfile.ZipFile(import_result.source_path) as source_zip:
+            return source_zip.read(page.archive_path)
+
+    if page.source_path is None:
+        raise ExporterError(f"页面缺少源文件路径：{page.display_name}")
+    return page.source_path.read_bytes()
+
+
+def _cbz_page_name(index: int, page: ComicPage) -> str:
+    extension = normalize_image_extension(page.extension)
+    return f"{index:04d}.{extension}"
