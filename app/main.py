@@ -6,6 +6,7 @@ import sys
 from PySide6.QtWidgets import QApplication
 
 from app.gui.main_window import MainWindow
+from app.storage.database import initialize_database
 
 
 def main() -> int:
@@ -13,6 +14,7 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    initialize_database()
 
     app = QApplication(sys.argv)
     window = MainWindow()
