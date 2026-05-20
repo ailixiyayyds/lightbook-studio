@@ -26,6 +26,7 @@ def export_novel_epub(
     tags: list[str],
     chapters: list[NovelChapter],
     output_path: Path,
+    cover_path: str | Path | None = None,
 ) -> Path:
     if not chapters:
         raise EpubExportError("无法导出 EPUB：chapters 不能为空。")
@@ -61,6 +62,12 @@ def export_novel_epub(
             str(volume_number),
             {"refines": "#lightbook-series", "property": "group-position"},
         )
+
+    if cover_path is not None:
+        cover_file = Path(cover_path)
+        if not cover_file.is_file():
+            raise EpubExportError(f"自定义封面不存在：{cover_file}")
+        book.set_cover(_epub_cover_name(cover_file), cover_file.read_bytes())
 
     style = epub.EpubItem(
         uid="style",
@@ -125,6 +132,15 @@ def _unique_terms(terms: list[str]) -> list[str]:
             seen.add(cleaned)
             result.append(cleaned)
     return result
+
+
+def _epub_cover_name(path: Path) -> str:
+    extension = path.suffix.casefold()
+    if extension == ".jpeg":
+        extension = ".jpg"
+    if extension not in {".jpg", ".png", ".webp", ".gif"}:
+        extension = ".jpg"
+    return f"images/cover{extension}"
 
 
 _CSS = """

@@ -72,6 +72,7 @@ def export_novel_preview_from_database(
         tags=_split_terms(str(work.get("tags") or "")),
         chapters=chapters,
         output_path=output_path,
+        cover_path=_book_cover_path(book),
     )
 
 
@@ -116,6 +117,7 @@ def _export_novel_book(
         tags=_split_terms(str(work.get("tags") or "")),
         chapters=chapters,
         output_path=planned.epub_path,
+        cover_path=_book_cover_path(book),
     )
     return planned.epub_path
 
@@ -144,8 +146,22 @@ def _export_manga_book(book: RowDict, work: RowDict, output_root: Path) -> Path:
         language_iso=str(work.get("language_iso") or "zh"),
         manga_direction=_manga_direction(str(book.get("manga_direction") or "rtl")),
     )
-    result = export_cbz(import_result, output_root, metadata)
+    cover_path = _book_cover_path(book)
+    if cover_path is None:
+        result = export_cbz(import_result, output_root, metadata)
+    else:
+        result = export_cbz(
+            import_result,
+            output_root,
+            metadata,
+            cover_override_path=cover_path,
+        )
     return result.cbz_path
+
+
+def _book_cover_path(book: RowDict) -> Path | None:
+    cover_value = str(book.get("cover_override_path") or book.get("cover_path") or "").strip()
+    return Path(cover_value) if cover_value else None
 
 
 def _novel_chapters_from_database(

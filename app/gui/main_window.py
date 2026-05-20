@@ -37,12 +37,15 @@ from PySide6.QtWidgets import (
 from app.core.config import load_config, save_config
 from app.core.models import ComicMetadata, ImportResult, LightBookError, MangaDirection
 from app.exporters.cbz_exporter import export_cbz
+from app.exporters.epub_exporter import export_novel_epub
 from app.importers.cbz_importer import import_cbz
 from app.importers.comic_epub_importer import import_comic_epub
 from app.importers.image_folder_importer import import_image_folder
 from app.importers.novel_txt_importer import NovelImportResult, import_novel_txt
+from app.parsers.novel_chapter_parser import NovelChapter
 from app.services.batch_export_service import export_book_from_database, export_novel_preview_from_database
 from app.services.batch_import_service import batch_import
+from app.services.output_planner import plan_novel_output
 from app.storage.repositories import (
     RowDict,
     bulk_update_book_status,
@@ -63,6 +66,7 @@ from app.storage.repositories import (
 )
 from app.utils.filename_parser import parse_comic_filename
 from app.utils.filename import sanitize_windows_filename
+from app.utils.image_utils import is_supported_image_path
 from app.utils.natural_sort import natural_sorted
 
 logger = logging.getLogger(__name__)
@@ -79,6 +83,9 @@ class MainWindow(QMainWindow):
 
         self.config = load_config()
         self.import_result: ImportResult | None = None
+        self.novel_import_result: NovelImportResult | None = None
+        self.single_cover_override_path: Path | None = None
+        self.batch_cover_override_path: Path | None = None
         self.output_root = Path(self.config.recent_output_dir) if self.config.recent_output_dir else None
         self.current_batch_book_id: int | None = None
 
@@ -118,6 +125,11 @@ class MainWindow(QMainWindow):
         self.language_edit = QLineEdit("zh")
         self.direction_combo = QComboBox()
         self.direction_combo.addItems(["rtl", "ltr", "webtoon"])
+        self.single_cover_override_label = QLabel("未选择")
+        self.single_choose_cover_button = QPushButton("选择封面")
+        self.single_choose_cover_button.clicked.connect(self._choose_single_cover)
+        self.single_clear_cover_button = QPushButton("清除封面")
+        self.single_clear_cover_button.clicked.connect(self._clear_single_cover)
 
     def _create_batch_widgets(self) -> None:
         self.batch_table = QTableWidget(0, len(BATCH_TABLE_COLUMNS))
@@ -146,6 +158,15 @@ class MainWindow(QMainWindow):
         self.batch_language_edit = QLineEdit("zh")
         self.batch_direction_combo = QComboBox()
         self.batch_direction_combo.addItems(["rtl", "ltr", "webtoon"])
+        self.batch_cover_override_label = QLabel("未选择")
+        self.batch_choose_cover_button = QPushButton("选择封面")
+        self.batch_choose_cover_button.clicked.connect(self._choose_batch_cover)
+        self.batch_clear_cover_button = QPushButton("清除封面")
+        self.batch_clear_cover_button.clicked.connect(self._clear_batch_cover)
+        self.batch_cover_preview_label = QLabel()
+        self.batch_cover_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.batch_cover_preview_label.setMinimumSize(120, 160)
+        self.batch_cover_preview_label.setStyleSheet("border: 1px solid #cccccc; background: #fafafa;")
 
         self.batch_chapter_label = QLabel("章节列表")
         self.batch_chapter_table = QTableWidget(0, 3)
@@ -185,16 +206,16 @@ class MainWindow(QMainWindow):
     def _build_single_import_tab(self) -> QWidget:
         choose_folder_button = QPushButton("选择图片文件夹")
         choose_folder_button.clicked.connect(self._choose_image_folder)
-        choose_epub_button = QPushButton("选择 EPUB")
-        choose_epub_button.clicked.connect(self._choose_epub)
+        choose_file_button = QPushButton("选择 EPUB/CBZ/TXT")
+        choose_file_button.clicked.connect(self._choose_single_file)
         choose_output_button = QPushButton("选择输出目录")
         choose_output_button.clicked.connect(self._choose_output)
-        export_button = QPushButton("导出 CBZ")
+        export_button = QPushButton("导出")
         export_button.clicked.connect(self._export)
 
         top_buttons = QHBoxLayout()
         top_buttons.addWidget(choose_folder_button)
-        top_buttons.addWidget(choose_epub_button)
+        top_buttons.addWidget(choose_file_button)
         top_buttons.addWidget(choose_output_button)
         top_buttons.addStretch()
         top_buttons.addWidget(export_button)
@@ -217,6 +238,11 @@ class MainWindow(QMainWindow):
         metadata_form.addRow("标签，逗号分隔", self.tags_edit)
         metadata_form.addRow("语言", self.language_edit)
         metadata_form.addRow("阅读方向", self.direction_combo)
+        cover_buttons = QHBoxLayout()
+        cover_buttons.addWidget(self.single_choose_cover_button)
+        cover_buttons.addWidget(self.single_clear_cover_button)
+        metadata_form.addRow("自定义封面", self.single_cover_override_label)
+        metadata_form.addRow("", cover_buttons)
 
         left = QVBoxLayout()
         left.addLayout(info_form)
@@ -280,6 +306,12 @@ class MainWindow(QMainWindow):
         form.addRow("tags", self.batch_tags_edit)
         form.addRow("language_iso", self.batch_language_edit)
         form.addRow("manga_direction", self.batch_direction_combo)
+        batch_cover_buttons = QHBoxLayout()
+        batch_cover_buttons.addWidget(self.batch_choose_cover_button)
+        batch_cover_buttons.addWidget(self.batch_clear_cover_button)
+        form.addRow("cover_override", self.batch_cover_override_label)
+        form.addRow("", batch_cover_buttons)
+        form.addRow("cover_preview", self.batch_cover_preview_label)
 
         save_button = QPushButton("保存修改")
         save_button.clicked.connect(lambda: self._save_batch_metadata())
@@ -349,17 +381,26 @@ class MainWindow(QMainWindow):
             return
         self._load_source(Path(folder), import_image_folder)
 
-    def _choose_epub(self) -> None:
+    def _choose_single_file(self) -> None:
         start_dir = self.config.recent_input_dir or str(Path.home())
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "选择 EPUB",
+            "选择 EPUB / CBZ / TXT",
             start_dir,
-            "EPUB Files (*.epub);;All Files (*)",
+            "Supported Files (*.epub *.cbz *.txt);;EPUB Files (*.epub);;CBZ Files (*.cbz);;TXT Files (*.txt);;All Files (*)",
         )
         if not file_path:
             return
-        self._load_source(Path(file_path), import_comic_epub)
+        path = Path(file_path)
+        suffix = path.suffix.casefold()
+        if suffix == ".epub":
+            self._load_source(path, import_comic_epub)
+        elif suffix == ".cbz":
+            self._load_source(path, import_cbz)
+        elif suffix == ".txt":
+            self._load_novel_source(path)
+        else:
+            self._show_error(f"不支持的文件类型：{path.suffix}")
 
     def _choose_output(self) -> None:
         start_dir = self.config.recent_output_dir or str(Path.home())
@@ -388,10 +429,32 @@ class MainWindow(QMainWindow):
             return
 
         self.import_result = result
+        self.novel_import_result = None
+        self.single_cover_override_path = None
+        self.single_cover_override_label.setText("未选择")
         recent_dir = path if path.is_dir() else path.parent
         self.config.recent_input_dir = str(recent_dir)
         save_config(self.config)
         self._populate_import_result(result)
+
+    def _load_novel_source(self, path: Path) -> None:
+        try:
+            result = import_novel_txt(path)
+        except LightBookError as exc:
+            self._show_error(str(exc))
+            return
+        except Exception as exc:
+            logger.exception("Unexpected novel import error")
+            self._show_error(f"导入失败：{exc}")
+            return
+
+        self.import_result = None
+        self.novel_import_result = result
+        self.single_cover_override_path = None
+        self.single_cover_override_label.setText("未选择")
+        self.config.recent_input_dir = str(path.parent)
+        save_config(self.config)
+        self._populate_novel_import_result(result)
 
     def _populate_import_result(self, result: ImportResult) -> None:
         self.source_label.setText(str(result.source_path))
@@ -402,18 +465,107 @@ class MainWindow(QMainWindow):
             self.file_list.addItem(page.display_name)
 
         self._populate_metadata(result.metadata)
-        pixmap = QPixmap()
-        pixmap.loadFromData(result.cover_data)
-        if not pixmap.isNull():
-            self.cover_label.setPixmap(
-                pixmap.scaled(
-                    self.cover_label.size(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
+        self._show_single_import_cover()
+
+    def _populate_novel_import_result(self, result: NovelImportResult) -> None:
+        self.source_label.setText(str(result.source_path))
+        self.page_count_label.setText(str(result.chapter_count))
+        self.warning_box.setPlainText("\n".join(result.warnings))
+        self.file_list.clear()
+        for chapter in _flatten_novel_import_chapters(result)[:20]:
+            self.file_list.addItem(chapter.title)
+
+        series_title, book_title, volume_number = _resolve_titles_from_novel_import(
+            result.source_path,
+            result,
+        )
+        self.series_title_edit.setText(series_title)
+        self.book_title_edit.setText(book_title)
+        self.volume_number_edit.setText("" if volume_number is None else str(volume_number))
+        self.author_edit.setText(result.author_guess)
+        self.translator_edit.clear()
+        self.summary_edit.clear()
+        self.genres_edit.clear()
+        self.tags_edit.clear()
+        self.language_edit.setText("zh")
+        self.direction_combo.setCurrentIndex(0)
+        self.cover_label.clear()
+        self.cover_label.setText("未选择封面")
+
+    def _choose_single_cover(self) -> None:
+        path = self._choose_cover_path()
+        if path is None:
+            return
+        self.single_cover_override_path = path
+        self.single_cover_override_label.setText(str(path))
+        self._show_cover_file(self.cover_label, path)
+
+    def _clear_single_cover(self) -> None:
+        self.single_cover_override_path = None
+        self.single_cover_override_label.setText("未选择")
+        self._show_single_import_cover()
+
+    def _show_single_import_cover(self) -> None:
+        if self.single_cover_override_path is not None:
+            self._show_cover_file(self.cover_label, self.single_cover_override_path)
+            return
+        if self.import_result is not None:
+            self._show_cover_bytes(self.cover_label, self.import_result.cover_data)
         else:
-            self.cover_label.setText("无法预览封面")
+            self.cover_label.clear()
+            self.cover_label.setText("未选择封面")
+
+    def _choose_batch_cover(self) -> None:
+        path = self._choose_cover_path()
+        if path is None:
+            return
+        self.batch_cover_override_path = path
+        self.batch_cover_override_label.setText(str(path))
+        self._show_cover_file(self.batch_cover_preview_label, path)
+
+    def _clear_batch_cover(self) -> None:
+        self.batch_cover_override_path = None
+        self.batch_cover_override_label.setText("未选择")
+        self.batch_cover_preview_label.clear()
+        self.batch_cover_preview_label.setText("未选择封面")
+
+    def _choose_cover_path(self) -> Path | None:
+        start_dir = self.config.recent_input_dir or str(Path.home())
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择封面",
+            start_dir,
+            "Image Files (*.jpg *.jpeg *.png *.webp *.gif);;All Files (*)",
+        )
+        if not file_path:
+            return None
+        path = Path(file_path)
+        if not is_supported_image_path(path):
+            self._show_error("请选择 jpg、jpeg、png、webp 或 gif 封面文件。")
+            return None
+        return path
+
+    def _show_cover_file(self, label: QLabel, path: Path) -> None:
+        pixmap = QPixmap(str(path))
+        self._set_cover_pixmap(label, pixmap, "无法预览封面")
+
+    def _show_cover_bytes(self, label: QLabel, data: bytes) -> None:
+        pixmap = QPixmap()
+        pixmap.loadFromData(data)
+        self._set_cover_pixmap(label, pixmap, "无法预览封面")
+
+    def _set_cover_pixmap(self, label: QLabel, pixmap: QPixmap, fallback_text: str) -> None:
+        if pixmap.isNull():
+            label.clear()
+            label.setText(fallback_text)
+            return
+        label.setPixmap(
+            pixmap.scaled(
+                label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
 
     def _populate_metadata(self, metadata: ComicMetadata) -> None:
         self.series_title_edit.setText(metadata.series_title)
@@ -448,16 +600,26 @@ class MainWindow(QMainWindow):
         )
 
     def _export(self) -> None:
-        if self.import_result is None:
-            self._show_error("请先选择图片文件夹或 EPUB。")
+        if self.import_result is None and self.novel_import_result is None:
+            self._show_error("请先选择图片文件夹、EPUB、CBZ 或 TXT。")
             return
         if self.output_root is None:
             self._show_error("请先选择输出目录。")
             return
 
         try:
-            metadata = self._metadata_from_form()
-            result = export_cbz(self.import_result, self.output_root, metadata)
+            if self.import_result is not None:
+                metadata = self._metadata_from_form()
+                result = export_cbz(
+                    self.import_result,
+                    self.output_root,
+                    metadata,
+                    cover_override_path=self.single_cover_override_path,
+                )
+                message = f"CBZ：{result.cbz_path}\nPoster：{result.poster_path}"
+            else:
+                output_path = self._export_single_novel()
+                message = f"EPUB：{output_path}"
         except LightBookError as exc:
             self._show_error(str(exc))
             return
@@ -471,7 +633,32 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "导出完成",
-            f"CBZ：{result.cbz_path}\nPoster：{result.poster_path}",
+            message,
+        )
+
+    def _export_single_novel(self) -> Path:
+        if self.novel_import_result is None or self.output_root is None:
+            raise LightBookError("请先选择轻小说 TXT 和输出目录。")
+        chapters = _flatten_novel_import_chapters(self.novel_import_result)
+        if not chapters:
+            raise LightBookError("没有可导出的小说章节。")
+        volume_number = _parse_optional_int(self.volume_number_edit.text(), "volume_number")
+        series_title = self.series_title_edit.text().strip() or "未命名轻小说"
+        book_title = self.book_title_edit.text().strip() or series_title
+        planned = plan_novel_output(self.output_root, series_title, book_title, volume_number)
+        planned.series_dir.mkdir(parents=True, exist_ok=True)
+        return export_novel_epub(
+            series_title=series_title,
+            book_title=book_title,
+            volume_number=volume_number,
+            author=self.author_edit.text().strip(),
+            summary=self.summary_edit.toPlainText().strip(),
+            language_iso=self.language_edit.text().strip() or "zh",
+            genres=_split_terms(self.genres_edit.text()),
+            tags=_split_terms(self.tags_edit.text()),
+            chapters=chapters,
+            output_path=planned.epub_path,
+            cover_path=self.single_cover_override_path,
         )
 
     def _batch_choose_epubs(self) -> None:
@@ -917,6 +1104,7 @@ class MainWindow(QMainWindow):
         self.batch_genres_edit.setText(str(work.get("genres") or ""))
         self.batch_tags_edit.setText(str(work.get("tags") or ""))
         self.batch_language_edit.setText(str(work.get("language_iso") or "zh"))
+        self._load_batch_cover_override(book)
         direction = str(book.get("manga_direction") or "rtl")
         index = self.batch_direction_combo.findText(direction)
         self.batch_direction_combo.setCurrentIndex(index if index >= 0 else 0)
@@ -929,6 +1117,18 @@ class MainWindow(QMainWindow):
             self.batch_direction_combo.setToolTip("")
             self._load_batch_chapters(None)
         self._set_novel_chapter_widgets_visible(is_novel)
+
+    def _load_batch_cover_override(self, book: RowDict) -> None:
+        cover_value = str(book.get("cover_override_path") or "").strip()
+        if cover_value:
+            self.batch_cover_override_path = Path(cover_value)
+            self.batch_cover_override_label.setText(cover_value)
+            self._show_cover_file(self.batch_cover_preview_label, self.batch_cover_override_path)
+        else:
+            self.batch_cover_override_path = None
+            self.batch_cover_override_label.setText("未选择")
+            self.batch_cover_preview_label.clear()
+            self.batch_cover_preview_label.setText("未选择封面")
 
     def _set_novel_chapter_widgets_visible(self, visible: bool) -> None:
         for widget in (
@@ -1072,6 +1272,10 @@ class MainWindow(QMainWindow):
         self.batch_translator_edit.setEnabled(True)
         self.batch_direction_combo.setEnabled(True)
         self.batch_direction_combo.setToolTip("")
+        self.batch_cover_override_path = None
+        self.batch_cover_override_label.setText("未选择")
+        self.batch_cover_preview_label.clear()
+        self.batch_cover_preview_label.setText("未选择封面")
         self._load_batch_chapters(None)
         self._set_novel_chapter_widgets_visible(False)
 
@@ -1093,6 +1297,7 @@ class MainWindow(QMainWindow):
             series_title = self.batch_series_title_edit.text().strip() or "Untitled"
             book_title = self.batch_book_title_edit.text().strip() or series_title
             is_novel = _is_novel_db_book(book)
+            cover_override_path = str(self.batch_cover_override_path or "")
             update_work(
                 int(book["work_id"]),
                 title=series_title,
@@ -1110,6 +1315,7 @@ class MainWindow(QMainWindow):
                     media_type="novel",
                     source_type="novel_txt",
                     export_format="epub",
+                    cover_override_path=cover_override_path,
                     status="ready",
                 )
             else:
@@ -1119,6 +1325,7 @@ class MainWindow(QMainWindow):
                     volume_number=volume_number,
                     media_type="comic",
                     export_format="cbz",
+                    cover_override_path=cover_override_path,
                     translator=self.batch_translator_edit.text().strip(),
                     manga_direction=self.batch_direction_combo.currentText(),
                     status="ready",
@@ -1235,6 +1442,25 @@ class MainWindow(QMainWindow):
 
 def _preview_epub_path(book_id: int) -> Path:
     return Path("data") / "previews" / str(book_id) / "preview.epub"
+
+
+def _flatten_novel_import_chapters(import_result: NovelImportResult) -> list[NovelChapter]:
+    chapters: list[NovelChapter] = []
+    order_index = 1
+    for volume in import_result.volumes:
+        volume_title = str(getattr(volume, "title", "") or "")
+        for chapter in getattr(volume, "chapters", []):
+            chapter_title = str(getattr(chapter, "title", "") or "正文")
+            title = f"{volume_title} {chapter_title}".strip() if volume_title else chapter_title
+            chapters.append(
+                NovelChapter(
+                    title=title,
+                    content=str(getattr(chapter, "content", "") or ""),
+                    order_index=order_index,
+                )
+            )
+            order_index += 1
+    return chapters
 
 
 def _split_terms(value: str) -> list[str]:

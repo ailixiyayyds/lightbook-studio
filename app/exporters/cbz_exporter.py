@@ -16,6 +16,7 @@ def export_cbz(
     import_result: ImportResult,
     output_root: str | Path,
     metadata: ComicMetadata | None = None,
+    cover_override_path: str | Path | None = None,
 ) -> ExportResult:
     if not import_result.pages:
         raise ExporterError("没有可导出的页面。")
@@ -39,7 +40,7 @@ def export_cbz(
             else:
                 _write_file_pages(cbz, import_result.pages)
 
-        cover_bytes = _read_page_bytes(import_result, import_result.pages[0])
+        cover_bytes = _read_cover_bytes(import_result, cover_override_path)
         write_poster_jpeg(cover_bytes, poster_path)
     except OSError as exc:
         raise ExporterError(f"导出失败：{exc}") from exc
@@ -56,6 +57,15 @@ def export_cbz(
         poster_path=poster_path,
         warnings=import_result.warnings.copy(),
     )
+
+
+def _read_cover_bytes(import_result: ImportResult, cover_override_path: str | Path | None) -> bytes:
+    if cover_override_path is not None:
+        cover_path = Path(cover_override_path)
+        if not cover_path.is_file():
+            raise ExporterError(f"自定义封面不存在：{cover_path}")
+        return cover_path.read_bytes()
+    return _read_page_bytes(import_result, import_result.pages[0])
 
 
 def _write_file_pages(cbz: zipfile.ZipFile, pages: list[ComicPage]) -> None:
