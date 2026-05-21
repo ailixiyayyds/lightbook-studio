@@ -42,6 +42,7 @@ def test_build_ai_metadata_request_for_comic(tmp_path: Path) -> None:
         "series_title": "Comic Series",
         "book_title": "Volume 1",
         "volume_number": 1,
+        "translator": "",
         "author": "Author",
         "summary": "Summary",
         "genres": "Action, Fantasy",
@@ -52,6 +53,14 @@ def test_build_ai_metadata_request_for_comic(tmp_path: Path) -> None:
     assert request.source_info["source_type"] == "cbz"
     assert request.source_info["source_path"] == str(tmp_path / "Comic Series v01.cbz")
     assert request.source_info["original_filename"] == "Comic Series v01.cbz"
+    assert request.source_info["source_filename"] == "Comic Series v01.cbz"
+    assert request.source_info["raw_series_title"] == "Comic Series"
+    assert request.source_info["raw_book_title"] == "Volume 1"
+    assert request.source_info["local_clean_guess"] == {
+        "clean_title": "Comic Series",
+        "book_title": "第 01 卷",
+        "volume_number": 1,
+    }
     assert request.chapter_titles == []
     assert request.text_sample == ""
     assert request.page_count == 120

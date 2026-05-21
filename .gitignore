@@ -7,5 +7,6 @@ data/
 *.db
 config.json
 .env
+*.env
 .venv/
 .claude/

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol
 
+from app.ai.title_cleaner import clean_release_title, infer_book_title
 from app.ai.types import AiMetadataRequest
 from app.core.models import LightBookError
 
@@ -31,6 +32,8 @@ def build_ai_metadata_request(book_id: int, repository: MetadataRepository) -> A
     media_type = _media_type(book)
     source_path = str(book.get("source_path") or "")
     source_type = str(book.get("source_type") or "")
+    raw_series_title = str(work.get("title") or "")
+    raw_book_title = str(book.get("title") or "")
     cover_path = _cover_path(book)
     chapter_titles: list[str] = []
     text_sample = ""
@@ -50,6 +53,17 @@ def build_ai_metadata_request(book_id: int, repository: MetadataRepository) -> A
             "source_type": source_type,
             "source_path": source_path,
             "original_filename": Path(source_path).name,
+            "source_filename": Path(source_path).name,
+            "raw_series_title": raw_series_title,
+            "raw_book_title": raw_book_title,
+            "local_clean_guess": {
+                "clean_title": clean_release_title(raw_series_title or raw_book_title or Path(source_path).name),
+                "book_title": infer_book_title(
+                    _optional_int(book.get("volume_number")),
+                    raw_book_title,
+                ),
+                "volume_number": _optional_int(book.get("volume_number")),
+            },
             "chapter_count": int(book.get("chapter_count") or 0),
         },
         chapter_titles=chapter_titles,
@@ -64,6 +78,7 @@ def _current_metadata(book: dict[str, Any], work: dict[str, Any]) -> dict[str, A
         "series_title": str(work.get("title") or ""),
         "book_title": str(book.get("title") or ""),
         "volume_number": book.get("volume_number"),
+        "translator": str(book.get("translator") or ""),
         "author": str(work.get("author") or ""),
         "summary": str(work.get("summary") or ""),
         "genres": str(work.get("genres") or ""),
@@ -103,3 +118,12 @@ def _novel_text_sample(chapters: list[dict[str, Any]]) -> str:
         parts.append(content[:remaining])
         total_length += len(parts[-1])
     return "".join(parts)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

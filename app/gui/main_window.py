@@ -26,8 +26,11 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
+    QDoubleSpinBox,
+    QSpinBox,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -39,7 +42,9 @@ from PySide6.QtWidgets import (
 
 from app.core.config import load_config, save_config
 from app.core.models import ComicMetadata, ImportResult, LightBookError, MangaDirection
-from app.ai.mock_provider import MockAiProvider
+from app.ai.config import AiProviderConfig, load_ai_provider_config, save_ai_provider_config
+from app.ai.openai_compatible_provider import AiProviderConfigError, OpenAICompatibleProvider
+from app.ai.provider_factory import create_ai_provider
 from app.ai.suggestion_service import AiSuggestionService
 from app.exporters.cbz_exporter import export_cbz
 from app.exporters.epub_exporter import export_novel_epub
@@ -64,11 +69,13 @@ from app.storage.repositories import (
     create_ai_suggestion,
     get_ai_suggestion,
     list_latest_ai_suggestion_by_book,
+    get_setting,
     list_books_by_work,
     list_books,
     list_books_by_status,
     update_novel_chapter_title,
     list_works,
+    set_setting,
     update_book,
     update_work,
 )
@@ -81,24 +88,30 @@ logger = logging.getLogger(__name__)
 
 ImporterFunc = Callable[[str | Path], ImportResult]
 AI_APPLY_FIELDS = [
-    ("clean_title", "作品名"),
-    ("book_title", "本卷标题"),
-    ("volume_number", "卷号"),
-    ("authors", "作者"),
-    ("summary", "简介"),
-    ("genres", "分类"),
-    ("tags", "标签"),
-    ("language_iso", "语言"),
-    ("manga_direction", "阅读方向"),
+    ("clean_title", "作品名", True),
+    ("original_title", "原名", True),
+    ("aliases", "别名", False),
+    ("book_title", "本卷标题", True),
+    ("volume_number", "卷号", True),
+    ("authors", "作者", True),
+    ("illustrators", "插画", False),
+    ("translators", "译者", True),
+    ("summary", "简介", True),
+    ("genres", "分类", True),
+    ("tags", "标签", True),
+    ("language_iso", "语言", True),
+    ("manga_direction", "阅读方向", True),
+    ("series_status", "连载状态", False),
 ]
-BATCH_TABLE_COLUMNS = ["类型", "状态", "作品名", "卷号", "页/章数", "来源路径"]
+BATCH_TABLE_COLUMNS = ["类型", "状态", "作品名", "卷号", "页数 / 章节数", "来源路径"]
+IMPORTANT_AI_FIELDS = {"clean_title", "book_title", "volume_number", "summary", "genres", "tags", "language_iso"}
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("LightBook Studio")
-        self.resize(1180, 760)
+        self.resize(1600, 950)
 
         self.config = load_config()
         self.import_result: ImportResult | None = None
@@ -108,6 +121,7 @@ class MainWindow(QMainWindow):
         self.output_root = Path(self.config.recent_output_dir) if self.config.recent_output_dir else None
         self.current_batch_book_id: int | None = None
         self.current_ai_suggestion_id: int | None = None
+        self.current_ai_suggestion_row: RowDict | None = None
 
         self._create_single_import_widgets()
         self._create_batch_widgets()
@@ -172,7 +186,8 @@ class MainWindow(QMainWindow):
         self.batch_author_edit = QLineEdit()
         self.batch_translator_edit = QLineEdit()
         self.batch_summary_edit = QTextEdit()
-        self.batch_summary_edit.setMaximumHeight(130)
+        self.batch_summary_edit.setMinimumHeight(140)
+        self.batch_summary_edit.setMaximumHeight(220)
         self.batch_genres_edit = QLineEdit()
         self.batch_tags_edit = QLineEdit()
         self.batch_language_edit = QLineEdit("zh")
@@ -190,7 +205,7 @@ class MainWindow(QMainWindow):
 
         self.batch_chapter_label = QLabel("章节列表")
         self.batch_chapter_table = QTableWidget(0, 3)
-        self.batch_chapter_table.setHorizontalHeaderLabels(["order_index", "title", "字数"])
+        self.batch_chapter_table.setHorizontalHeaderLabels(["序号", "章节标题", "字数"])
         self.batch_chapter_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.batch_chapter_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.batch_chapter_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -218,22 +233,28 @@ class MainWindow(QMainWindow):
         self.ai_apply_button.clicked.connect(self._apply_selected_ai_fields)
         self.ai_ignore_button = QPushButton("忽略建议")
         self.ai_ignore_button.clicked.connect(self._ignore_ai_suggestion)
+        self.ai_raw_response_button = QPushButton("查看原始响应")
+        self.ai_raw_response_button.clicked.connect(self._show_ai_raw_response)
         self.ai_status_label = QLabel("AI 只提供建议，不会自动覆盖数据。")
-        self.ai_suggestion_table = QTableWidget(0, 5)
-        self.ai_suggestion_table.setHorizontalHeaderLabels(["字段", "当前值", "AI 建议", "置信度", "应用"])
+        self.ai_suggestion_table = QTableWidget(0, 4)
+        self.ai_suggestion_table.setHorizontalHeaderLabels(["字段", "当前值", "AI 建议", "应用"])
         self.ai_suggestion_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.ai_suggestion_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.ai_suggestion_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.ai_suggestion_table.setMinimumHeight(260)
         self.ai_suggestion_table.verticalHeader().setVisible(False)
         self.ai_suggestion_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.ai_suggestion_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._set_novel_chapter_widgets_visible(False)
 
     def _create_settings_widgets(self) -> None:
-        self.ai_provider_label = QLabel("MockAiProvider（默认，不调用网络）")
+        self.ai_provider_label = QLabel("OpenAICompatibleProvider")
+        self.ai_provider_combo = QComboBox()
+        self.ai_provider_combo.addItem("OpenAI Compatible / DeepSeek", "openai_compatible")
+        self.ai_provider_combo.addItem("Mock，仅开发测试", "mock")
         self.ai_base_url_edit = QLineEdit()
         self.ai_base_url_edit.setPlaceholderText("https://api.openai.com/v1")
-        self.ai_base_url_edit.setToolTip("预留给 OpenAI-compatible provider；当前默认仍使用 MockAiProvider。")
+        self.ai_base_url_edit.setToolTip("OpenAI-compatible / DeepSeek API 地址。")
         self.ai_model_edit = QLineEdit()
         self.ai_model_edit.setPlaceholderText("填写真实 provider 使用的模型名")
         self.ai_model_edit.setToolTip("预留字段，当前不会自动启用真实 provider。")
@@ -241,7 +262,22 @@ class MainWindow(QMainWindow):
         self.ai_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.ai_api_key_edit.setPlaceholderText("从环境变量 LIGHTBOOK_AI_API_KEY 读取，不在此保存")
         self.ai_api_key_edit.setEnabled(False)
+        self.ai_api_key_env_edit = QLineEdit()
+        self.ai_api_key_env_edit.setPlaceholderText("LIGHTBOOK_AI_API_KEY")
+        self.ai_timeout_spin = QSpinBox()
+        self.ai_timeout_spin.setRange(1, 600)
+        self.ai_temperature_spin = QDoubleSpinBox()
+        self.ai_temperature_spin.setRange(0.0, 2.0)
+        self.ai_temperature_spin.setSingleStep(0.1)
+        self.ai_temperature_spin.setDecimals(2)
+        self.ai_settings_hint_label = QLabel("API Key 请通过环境变量配置，例如 LIGHTBOOK_AI_API_KEY。")
+        self.ai_save_settings_button = QPushButton("保存 AI 设置")
+        self.ai_save_settings_button.clicked.connect(self._save_ai_settings)
+        self.ai_test_connection_button = QPushButton("测试连接")
+        self.ai_test_connection_button.clicked.connect(self._test_ai_connection)
         self.ai_api_key_status_label = QLabel(_ai_api_key_status_text())
+        self.ai_diagnostic_label = QLabel("")
+        self._load_ai_settings_into_widgets()
         self.settings_output_label = QLabel("未选择")
 
     def _build_ui(self) -> None:
@@ -272,7 +308,7 @@ class MainWindow(QMainWindow):
         info_form.addRow("来源路径", self.source_label)
         info_form.addRow("输出目录", self.output_label)
         info_form.addRow("页数", self.page_count_label)
-        info_form.addRow("Warnings", self.warning_box)
+        info_form.addRow("警告", self.warning_box)
         info_form.addRow("文件列表前 20 项", self.file_list)
 
         metadata_form = QFormLayout()
@@ -309,34 +345,25 @@ class MainWindow(QMainWindow):
         return container
 
     def _build_batch_tab(self) -> QWidget:
-        choose_epubs_button = QPushButton("选择多个 EPUB")
-        choose_epubs_button.clicked.connect(self._batch_choose_epubs)
-        choose_txt_button = QPushButton("选择 TXT 文件")
-        choose_txt_button.clicked.connect(self._batch_choose_txt)
-        choose_txts_button = QPushButton("选择多个 TXT 文件")
-        choose_txts_button.clicked.connect(self._batch_choose_txts)
-        choose_folders_button = QPushButton("选择多个图片文件夹")
-        choose_folders_button.clicked.connect(self._batch_choose_image_folders)
-        scan_epubs_button = QPushButton("扫描目录中的 EPUB")
-        scan_epubs_button.clicked.connect(self._batch_scan_epubs)
-        scan_txts_button = QPushButton("扫描目录中的 TXT")
-        scan_txts_button.clicked.connect(self._batch_scan_txts)
+        import_files_button = QPushButton("导入文件")
+        import_files_button.clicked.connect(self._batch_import_files)
+        import_folders_button = QPushButton("导入文件夹")
+        import_folders_button.clicked.connect(self._batch_import_folders)
+        scan_sources_button = QPushButton("扫描目录")
+        scan_sources_button.clicked.connect(self._batch_scan_sources)
         refresh_button = QPushButton("刷新")
         refresh_button.clicked.connect(self._refresh_batch_table)
-        mark_ready_button = QPushButton("选中项标记 ready")
+        mark_ready_button = QPushButton("选中项标记可导出")
         mark_ready_button.clicked.connect(lambda: self._mark_selected_batch_books("ready"))
-        mark_need_review_button = QPushButton("选中项标记 need_review")
+        mark_need_review_button = QPushButton("选中项标记待确认")
         mark_need_review_button.clicked.connect(lambda: self._mark_selected_batch_books("need_review"))
         delete_selected_button = QPushButton("删除选中项")
         delete_selected_button.clicked.connect(self._delete_selected_batch_books)
 
         top_buttons = QHBoxLayout()
-        top_buttons.addWidget(choose_epubs_button)
-        top_buttons.addWidget(choose_txt_button)
-        top_buttons.addWidget(choose_txts_button)
-        top_buttons.addWidget(choose_folders_button)
-        top_buttons.addWidget(scan_epubs_button)
-        top_buttons.addWidget(scan_txts_button)
+        top_buttons.addWidget(import_files_button)
+        top_buttons.addWidget(import_folders_button)
+        top_buttons.addWidget(scan_sources_button)
         top_buttons.addStretch()
         top_buttons.addWidget(mark_ready_button)
         top_buttons.addWidget(mark_need_review_button)
@@ -344,22 +371,22 @@ class MainWindow(QMainWindow):
         top_buttons.addWidget(refresh_button)
 
         form = QFormLayout()
-        form.addRow("series_title", self.batch_series_title_edit)
-        form.addRow("book_title", self.batch_book_title_edit)
-        form.addRow("volume_number", self.batch_volume_number_edit)
-        form.addRow("author", self.batch_author_edit)
-        form.addRow("translator", self.batch_translator_edit)
-        form.addRow("summary", self.batch_summary_edit)
-        form.addRow("genres", self.batch_genres_edit)
-        form.addRow("tags", self.batch_tags_edit)
-        form.addRow("language_iso", self.batch_language_edit)
-        form.addRow("manga_direction", self.batch_direction_combo)
+        form.addRow("作品名", self.batch_series_title_edit)
+        form.addRow("本卷标题", self.batch_book_title_edit)
+        form.addRow("卷号", self.batch_volume_number_edit)
+        form.addRow("作者", self.batch_author_edit)
+        form.addRow("译者 / 汉化组", self.batch_translator_edit)
+        form.addRow("简介", self.batch_summary_edit)
+        form.addRow("分类", self.batch_genres_edit)
+        form.addRow("标签", self.batch_tags_edit)
+        form.addRow("语言", self.batch_language_edit)
+        form.addRow("阅读方向", self.batch_direction_combo)
         batch_cover_buttons = QHBoxLayout()
         batch_cover_buttons.addWidget(self.batch_choose_cover_button)
         batch_cover_buttons.addWidget(self.batch_clear_cover_button)
-        form.addRow("cover_override", self.batch_cover_override_label)
+        form.addRow("自定义封面", self.batch_cover_override_label)
         form.addRow("", batch_cover_buttons)
-        form.addRow("cover_preview", self.batch_cover_preview_label)
+        form.addRow("封面预览", self.batch_cover_preview_label)
 
         save_button = QPushButton("保存修改")
         save_button.clicked.connect(lambda: self._save_batch_metadata())
@@ -382,6 +409,7 @@ class MainWindow(QMainWindow):
         ai_buttons.addWidget(self.ai_generate_button)
         ai_buttons.addWidget(self.ai_apply_button)
         ai_buttons.addWidget(self.ai_ignore_button)
+        ai_buttons.addWidget(self.ai_raw_response_button)
         ai_group = QGroupBox("AI 辅助")
         ai_layout = QVBoxLayout()
         ai_layout.addLayout(ai_buttons)
@@ -405,8 +433,12 @@ class MainWindow(QMainWindow):
         form_container.setLayout(form_layout)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        detail_scroll = QScrollArea()
+        detail_scroll.setWidgetResizable(True)
+        detail_scroll.setWidget(form_container)
+
         splitter.addWidget(self.batch_table)
-        splitter.addWidget(form_container)
+        splitter.addWidget(detail_scroll)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
 
@@ -428,8 +460,18 @@ class MainWindow(QMainWindow):
         form.addRow("AI provider", self.ai_provider_label)
         form.addRow("AI base_url", self.ai_base_url_edit)
         form.addRow("AI model", self.ai_model_edit)
+        form.addRow("Provider 类型", self.ai_provider_combo)
+        form.addRow("API Key 环境变量名", self.ai_api_key_env_edit)
+        form.addRow("Timeout 秒数", self.ai_timeout_spin)
+        form.addRow("Temperature", self.ai_temperature_spin)
+        form.addRow("说明", self.ai_settings_hint_label)
+        ai_settings_buttons = QHBoxLayout()
+        ai_settings_buttons.addWidget(self.ai_save_settings_button)
+        ai_settings_buttons.addWidget(self.ai_test_connection_button)
+        form.addRow("", ai_settings_buttons)
         form.addRow("AI api_key", self.ai_api_key_edit)
         form.addRow("AI key 状态", self.ai_api_key_status_label)
+        form.addRow("AI 诊断", self.ai_diagnostic_label)
 
         root = QVBoxLayout()
         root.addLayout(form)
@@ -481,6 +523,81 @@ class MainWindow(QMainWindow):
         text = str(self.output_root) if self.output_root else "未选择"
         self.output_label.setText(text)
         self.settings_output_label.setText(text)
+
+    def _load_ai_settings_into_widgets(self) -> None:
+        config = load_ai_provider_config(_GuiAiRepository())
+        provider_index = self.ai_provider_combo.findData(config.provider_type)
+        self.ai_provider_combo.setCurrentIndex(provider_index if provider_index >= 0 else 0)
+        self.ai_base_url_edit.setText(config.base_url)
+        self.ai_model_edit.setText(config.model)
+        self.ai_api_key_env_edit.setText(config.api_key_env)
+        self.ai_timeout_spin.setValue(config.timeout_seconds)
+        self.ai_temperature_spin.setValue(config.temperature)
+        self.ai_api_key_status_label.setText(_ai_api_key_status_text(config.api_key_env))
+        self._refresh_ai_provider_status(config)
+
+    def _ai_config_from_settings_form(self) -> AiProviderConfig:
+        return AiProviderConfig(
+            provider_type=str(self.ai_provider_combo.currentData() or "openai_compatible"),
+            base_url=self.ai_base_url_edit.text().strip() or "https://api.deepseek.com",
+            model=self.ai_model_edit.text().strip() or "deepseek-v4-flash",
+            api_key_env=self.ai_api_key_env_edit.text().strip() or "LIGHTBOOK_AI_API_KEY",
+            timeout_seconds=int(self.ai_timeout_spin.value()),
+            temperature=float(self.ai_temperature_spin.value()),
+        )
+
+    def _save_ai_settings(self) -> None:
+        config = self._ai_config_from_settings_form()
+        try:
+            save_ai_provider_config(_GuiAiRepository(), config)
+        except AiProviderConfigError:
+            config = load_ai_provider_config(_GuiAiRepository())
+            self._show_error(f"未配置 API Key，请设置环境变量 {config.api_key_env}。")
+        except Exception as exc:
+            logger.exception("Failed to save AI settings")
+            self._show_error(f"保存 AI 设置失败：{exc}")
+            return
+        self.ai_api_key_status_label.setText(_ai_api_key_status_text(config.api_key_env))
+        self._refresh_ai_provider_status(config)
+        QMessageBox.information(self, "AI 设置", "AI 设置已保存。")
+
+    def _refresh_ai_provider_status(self, config: AiProviderConfig) -> None:
+        provider = create_ai_provider(config)
+        provider_class = provider.__class__.__name__
+        self.ai_provider_label.setText(provider_class)
+        api_key = os.environ.get(config.api_key_env, "")
+        self.ai_diagnostic_label.setText(
+            "provider_type={provider_type}; class={provider_class}; base_url={base_url}; "
+            "model={model}; api_key_env={api_key_env}; api_key_loaded={loaded}; api_key={masked}".format(
+                provider_type=config.provider_type,
+                provider_class=provider_class,
+                base_url=config.base_url,
+                model=config.model,
+                api_key_env=config.api_key_env,
+                loaded=bool(api_key),
+                masked=_mask_api_key(api_key),
+            )
+        )
+
+    def _test_ai_connection(self) -> None:
+        config = self._ai_config_from_settings_form()
+        if config.provider_type == "mock":
+            QMessageBox.information(self, "AI 设置", "Mock Provider 可用。")
+            return
+        try:
+            provider = create_ai_provider(config)
+            if isinstance(provider, OpenAICompatibleProvider):
+                provider.test_connection()
+            else:
+                raise LightBookError("当前 provider 不支持测试连接。")
+        except AiProviderConfigError:
+            self._show_error(f"未配置 API Key，请设置环境变量 {config.api_key_env}。")
+            return
+        except Exception as exc:
+            logger.exception("AI connection test failed")
+            self._show_error(f"AI 连接测试失败：{exc}")
+            return
+        QMessageBox.information(self, "AI 设置", "AI 连接测试成功。")
 
     def _load_source(self, path: Path, importer: ImporterFunc) -> None:
         try:
@@ -726,6 +843,38 @@ class MainWindow(QMainWindow):
             cover_path=self.single_cover_override_path,
         )
 
+    def _batch_import_files(self) -> None:
+        start_dir = self.config.recent_input_dir or str(Path.home())
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "导入文件",
+            start_dir,
+            "Supported Files (*.epub *.cbz *.txt);;EPUB Files (*.epub);;CBZ Files (*.cbz);;TXT Files (*.txt);;All Files (*)",
+        )
+        if files:
+            self._run_batch_import([Path(file_path) for file_path in files])
+
+    def _batch_import_folders(self) -> None:
+        folders = self._choose_multiple_directories("导入文件夹")
+        if folders:
+            self._run_batch_import(folders)
+
+    def _batch_scan_sources(self) -> None:
+        start_dir = self.config.recent_input_dir or str(Path.home())
+        folder = QFileDialog.getExistingDirectory(self, "扫描目录", start_dir)
+        if not folder:
+            return
+        root = Path(folder)
+        supported_suffixes = {".epub", ".cbz", ".txt"}
+        paths = natural_sorted(
+            [path for path in root.rglob("*") if path.is_file() and path.suffix.casefold() in supported_suffixes],
+            key=lambda path: str(path),
+        )
+        if not paths:
+            QMessageBox.information(self, "批量整理", "没有找到 EPUB、CBZ 或 TXT 文件。")
+            return
+        self._run_batch_import(paths)
+
     def _batch_choose_epubs(self) -> None:
         start_dir = self.config.recent_input_dir or str(Path.home())
         files, _ = QFileDialog.getOpenFileNames(
@@ -760,7 +909,7 @@ class MainWindow(QMainWindow):
             self._run_batch_import([Path(file_path) for file_path in files])
 
     def _batch_choose_image_folders(self) -> None:
-        folders = self._choose_multiple_directories()
+        folders = self._choose_multiple_directories("选择多个图片文件夹")
         if folders:
             self._run_batch_import(folders)
 
@@ -794,9 +943,9 @@ class MainWindow(QMainWindow):
             return
         self._run_batch_import(paths)
 
-    def _choose_multiple_directories(self) -> list[Path]:
+    def _choose_multiple_directories(self, title: str = "选择多个图片文件夹") -> list[Path]:
         start_dir = self.config.recent_input_dir or str(Path.home())
-        dialog = QFileDialog(self, "选择多个图片文件夹", start_dir)
+        dialog = QFileDialog(self, title, start_dir)
         dialog.setFileMode(QFileDialog.FileMode.Directory)
         dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
         dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
@@ -861,8 +1010,8 @@ class MainWindow(QMainWindow):
             count_value = book.get("chapter_count") if _is_novel_db_book(book) else book.get("page_count")
             self.batch_table.insertRow(row_index)
             row_values = [
-                _book_media_type(book),
-                str(book.get("status") or ""),
+                _display_media_type(_book_media_type(book)),
+                _display_status(str(book.get("status") or "")),
                 str(work.get("title") or ""),
                 "" if book.get("volume_number") is None else str(book.get("volume_number")),
                 str(count_value or 0),
@@ -928,8 +1077,8 @@ class MainWindow(QMainWindow):
             self.batch_table.setCurrentCell(row, 0)
 
         menu = QMenu(self)
-        mark_ready_action = menu.addAction("标记 ready")
-        mark_need_review_action = menu.addAction("标记 need_review")
+        mark_ready_action = menu.addAction("标记可导出")
+        mark_need_review_action = menu.addAction("标记待确认")
         menu.addSeparator()
         delete_action = menu.addAction("删除")
         open_folder_action = menu.addAction("打开来源文件夹")
@@ -1202,14 +1351,20 @@ class MainWindow(QMainWindow):
             self._show_error("请先选择一个 book。")
             return
         try:
-            service = AiSuggestionService(_GuiAiRepository(), MockAiProvider())
+            config = load_ai_provider_config(_GuiAiRepository())
+            provider = create_ai_provider(config)
+            service = AiSuggestionService(_GuiAiRepository(), provider)
             service.generate_for_book(book_id)
             latest = list_latest_ai_suggestion_by_book(book_id)
             if latest is None:
                 raise LightBookError("AI 建议已生成，但无法从数据库读取。")
             self.current_ai_suggestion_id = int(latest["id"])
             self._populate_ai_suggestion_table(latest)
-            self.ai_status_label.setText("AI 建议已生成。请选择需要应用的字段。")
+            if self.ai_suggestion_table.rowCount() > 0:
+                self.ai_status_label.setText("AI 建议已生成。请选择需要应用的字段。")
+        except AiProviderConfigError:
+            config = load_ai_provider_config(_GuiAiRepository())
+            self._show_error(f"未配置 API Key，请设置环境变量 {config.api_key_env}。")
         except Exception as exc:
             logger.exception("Failed to generate AI suggestion")
             self.ai_status_label.setText(f"AI 建议生成失败：{exc}")
@@ -1230,7 +1385,9 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            service = AiSuggestionService(_GuiAiRepository(), MockAiProvider())
+            config = load_ai_provider_config(_GuiAiRepository())
+            provider = create_ai_provider(config)
+            service = AiSuggestionService(_GuiAiRepository(), provider)
             service.apply_suggestion(book_id, self.current_ai_suggestion_id, fields)
         except Exception as exc:
             logger.exception("Failed to apply AI suggestion")
@@ -1245,24 +1402,26 @@ class MainWindow(QMainWindow):
 
     def _clear_ai_suggestion_table(self) -> None:
         self.current_ai_suggestion_id = None
+        self.current_ai_suggestion_row = None
         self.ai_suggestion_table.setRowCount(0)
         self.ai_status_label.setText("AI 只提供建议，不会自动覆盖数据。")
 
     def _populate_ai_suggestion_table(self, suggestion: RowDict) -> None:
         parsed = _json_dict(suggestion.get("parsed_json"))
-        field_confidence = parsed.get("field_confidence")
-        if not isinstance(field_confidence, dict):
-            field_confidence = {}
-
+        self.current_ai_suggestion_row = suggestion
         self.ai_suggestion_table.setRowCount(0)
-        for row_index, (field_name, field_label) in enumerate(AI_APPLY_FIELDS):
+        row_index = 0
+        for field_name, field_label, can_apply in AI_APPLY_FIELDS:
+            current_value = self._current_ai_field_value(field_name)
+            suggested_value = _display_ai_value(parsed.get(field_name))
+            if not suggested_value and not (field_name in IMPORTANT_AI_FIELDS and not current_value):
+                continue
+
             self.ai_suggestion_table.insertRow(row_index)
-            confidence = field_confidence.get(field_name, parsed.get("confidence", suggestion.get("confidence", 0)))
             row_values = [
                 field_label,
-                self._current_ai_field_value(field_name),
-                _display_ai_value(parsed.get(field_name)),
-                _display_confidence(confidence),
+                current_value,
+                suggested_value,
             ]
             for column_index, value in enumerate(row_values):
                 item = QTableWidgetItem(value)
@@ -1270,19 +1429,27 @@ class MainWindow(QMainWindow):
                 self.ai_suggestion_table.setItem(row_index, column_index, item)
 
             apply_item = QTableWidgetItem()
-            apply_item.setFlags(
-                Qt.ItemFlag.ItemIsUserCheckable
-                | Qt.ItemFlag.ItemIsEnabled
-                | Qt.ItemFlag.ItemIsSelectable
-            )
-            apply_item.setCheckState(Qt.CheckState.Unchecked)
+            if can_apply:
+                apply_item.setFlags(
+                    Qt.ItemFlag.ItemIsUserCheckable
+                    | Qt.ItemFlag.ItemIsEnabled
+                    | Qt.ItemFlag.ItemIsSelectable
+                )
+                apply_item.setCheckState(Qt.CheckState.Unchecked)
+            else:
+                apply_item.setText("暂不支持应用")
+                apply_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
             apply_item.setData(Qt.ItemDataRole.UserRole, field_name)
-            self.ai_suggestion_table.setItem(row_index, 4, apply_item)
+            self.ai_suggestion_table.setItem(row_index, 3, apply_item)
+            row_index += 1
+
+        if row_index == 0:
+            self.ai_status_label.setText("AI 已返回，但没有可应用字段。请查看原始响应。")
 
     def _selected_ai_fields(self) -> list[str]:
         fields: list[str] = []
         for row in range(self.ai_suggestion_table.rowCount()):
-            item = self.ai_suggestion_table.item(row, 4)
+            item = self.ai_suggestion_table.item(row, 3)
             if item is None or item.checkState() != Qt.CheckState.Checked:
                 continue
             field_name = item.data(Qt.ItemDataRole.UserRole)
@@ -1299,6 +1466,8 @@ class MainWindow(QMainWindow):
             return self.batch_volume_number_edit.text()
         if field_name == "authors":
             return self.batch_author_edit.text()
+        if field_name == "translators":
+            return self.batch_translator_edit.text()
         if field_name == "summary":
             return self.batch_summary_edit.toPlainText()
         if field_name == "genres":
@@ -1310,6 +1479,19 @@ class MainWindow(QMainWindow):
         if field_name == "manga_direction":
             return self.batch_direction_combo.currentText()
         return ""
+
+    def _show_ai_raw_response(self) -> None:
+        suggestion = self.current_ai_suggestion_row
+        if suggestion is None and self.current_ai_suggestion_id is not None:
+            suggestion = get_ai_suggestion(self.current_ai_suggestion_id)
+        if suggestion is None:
+            QMessageBox.information(self, "AI 辅助", "当前没有 AI 建议。")
+            return
+        parsed_json = _json_dict(suggestion.get("parsed_json"))
+        raw_response = str(suggestion.get("raw_response") or "")[:3000]
+        parsed_text = json.dumps(parsed_json, ensure_ascii=False, indent=2)[:3000]
+        message = f"Raw response（前 3000 字）：\n{raw_response}\n\nParsed JSON：\n{parsed_text}"
+        QMessageBox.information(self, "AI 原始响应", message)
 
     def _set_novel_chapter_widgets_visible(self, visible: bool) -> None:
         for widget in (
@@ -1476,7 +1658,7 @@ class MainWindow(QMainWindow):
                 self.batch_volume_number_edit.text(),
                 "volume_number",
             )
-            series_title = self.batch_series_title_edit.text().strip() or "Untitled"
+            series_title = self.batch_series_title_edit.text().strip() or "未命名"
             book_title = self.batch_book_title_edit.text().strip() or series_title
             is_novel = _is_novel_db_book(book)
             cover_override_path = str(self.batch_cover_override_path or "")
@@ -1606,8 +1788,8 @@ class MainWindow(QMainWindow):
             direction = "rtl"
 
         return ComicMetadata(
-            series_title=str(work.get("title") or "Untitled"),
-            book_title=str(book.get("title") or work.get("title") or "Untitled"),
+            series_title=str(work.get("title") or "未命名"),
+            book_title=str(book.get("title") or work.get("title") or "未命名"),
             volume_number=int(book.get("volume_number") or 1),
             author=str(work.get("author") or ""),
             translator=str(book.get("translator") or ""),
@@ -1644,6 +1826,12 @@ class _GuiAiRepository:
     def update_book(self, book_id: int, **kwargs: Any) -> RowDict | None:
         return update_book(book_id, **kwargs)
 
+    def get_setting(self, key: str) -> str | None:
+        return get_setting(key)
+
+    def set_setting(self, key: str, value: str) -> None:
+        set_setting(key, value)
+
 
 def _preview_epub_path(book_id: int) -> Path:
     return Path("data") / "previews" / str(book_id) / "preview.epub"
@@ -1672,18 +1860,35 @@ def _display_ai_value(value: Any) -> str:
     return str(value)
 
 
-def _display_confidence(value: Any) -> str:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
+def _display_status(status: str) -> str:
+    return {
+        "need_review": "待确认",
+        "ready": "可导出",
+        "exported": "已导出",
+        "failed": "失败",
+        "pending": "等待中",
+    }.get(status, status)
+
+
+def _display_media_type(media_type: str) -> str:
+    return {
+        "comic": "漫画",
+        "novel": "轻小说",
+    }.get(media_type, media_type)
+
+
+def _ai_api_key_status_text(api_key_env: str = "LIGHTBOOK_AI_API_KEY") -> str:
+    if os.environ.get(api_key_env):
+        return f"已从环境变量 {api_key_env} 读取（不会保存到项目）。"
+    return f"未配置。需要真实 provider 时请设置环境变量 {api_key_env}。"
+
+
+def _mask_api_key(api_key: str) -> str:
+    if not api_key:
         return ""
-    return f"{number:.2f}"
-
-
-def _ai_api_key_status_text() -> str:
-    if os.environ.get("LIGHTBOOK_AI_API_KEY"):
-        return "已从环境变量 LIGHTBOOK_AI_API_KEY 读取（不会保存到项目）。"
-    return "未配置。需要真实 provider 时请设置环境变量 LIGHTBOOK_AI_API_KEY。"
+    if len(api_key) <= 10:
+        return "***"
+    return f"{api_key[:6]}***{api_key[-4:]}"
 
 
 def _flatten_novel_import_chapters(import_result: NovelImportResult) -> list[NovelChapter]:
@@ -1720,7 +1925,7 @@ def _resolve_titles_from_import(
         or metadata.series_title.strip()
         or metadata.book_title.strip()
         or source_path.stem
-        or "Untitled"
+        or "未命名"
     )
     book_title = (
         parsed.book_title.strip()

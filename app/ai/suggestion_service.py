@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict
 from typing import Any, Protocol
 
@@ -8,6 +9,9 @@ from app.ai.context_builder import build_ai_metadata_request
 from app.ai.metadata_schema import validate_ai_metadata
 from app.ai.provider import BaseAiProvider
 from app.core.models import AiMetadataSuggestion, LightBookError
+
+
+logger = logging.getLogger(__name__)
 
 
 class AiSuggestionRepository(Protocol):
@@ -71,10 +75,20 @@ class AiSuggestionService:
         try:
             request = build_ai_metadata_request(book_id, self.repository)
             input_snapshot = asdict(request)
+            logger.info(
+                "AI suggestion request built book_id=%s provider=%s provider_class=%s "
+                "media_type=%s text_sample_len=%s page_count=%s",
+                book_id,
+                provider_name,
+                self.provider.__class__.__name__,
+                request.media_type,
+                len(request.text_sample),
+                request.page_count,
+            )
             response = self.provider.suggest_metadata(request)
             raw_response = response.raw_text
             parsed = validate_ai_metadata(response.parsed)
-            self.repository.create_ai_suggestion(
+            row = self.repository.create_ai_suggestion(
                 book_id=book_id,
                 provider=response.provider or provider_name,
                 status="completed",
@@ -83,9 +97,16 @@ class AiSuggestionService:
                 parsed_json=parsed,
                 confidence=float(parsed["confidence"]),
             )
+            logger.info(
+                "AI suggestion saved id=%s book_id=%s status=completed provider=%s confidence=%s",
+                row.get("id"),
+                book_id,
+                response.provider or provider_name,
+                parsed["confidence"],
+            )
             return _metadata_suggestion_from_dict(parsed)
         except Exception as exc:
-            self.repository.create_ai_suggestion(
+            row = self.repository.create_ai_suggestion(
                 book_id=book_id,
                 provider=provider_name,
                 status="failed",
@@ -94,6 +115,13 @@ class AiSuggestionService:
                 parsed_json={},
                 confidence=0,
                 error_message=str(exc),
+            )
+            logger.exception(
+                "AI suggestion saved id=%s book_id=%s status=failed provider=%s error_message=%s",
+                row.get("id"),
+                book_id,
+                provider_name,
+                str(exc),
             )
             raise AiSuggestionServiceError(f"AI metadata suggestion failed for book {book_id}: {exc}") from exc
 
@@ -125,12 +153,16 @@ class AiSuggestionService:
 
         if "clean_title" in selected_fields:
             work_updates["title"] = parsed["clean_title"]
+        if "original_title" in selected_fields and "original_title" in work:
+            work_updates["original_title"] = parsed["original_title"]
         if "book_title" in selected_fields:
             book_updates["title"] = parsed["book_title"]
         if "volume_number" in selected_fields:
             book_updates["volume_number"] = parsed["volume_number"]
         if "authors" in selected_fields:
             work_updates["author"] = parsed["authors"][0] if parsed["authors"] else ""
+        if "translators" in selected_fields and "translator" in book:
+            book_updates["translator"] = parsed["translators"][0] if parsed["translators"] else ""
         if "summary" in selected_fields:
             work_updates["summary"] = parsed["summary"]
         if "genres" in selected_fields:
