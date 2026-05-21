@@ -1,19 +1,16 @@
 from __future__ import annotations
 
-import logging
 import sys
 
 from PySide6.QtWidgets import QApplication
 
+from app.core.logging_config import setup_logging
 from app.gui.main_window import MainWindow
 from app.storage.database import initialize_database
 
 
 def main() -> int:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    setup_logging()
     initialize_database()
 
     app = QApplication(sys.argv)

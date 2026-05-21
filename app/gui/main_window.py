@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
 from PySide6.QtCore import Qt
 from PySide6.QtCore import QUrl
-from PySide6.QtGui import QDesktopServices, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QAction, QDesktopServices, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -41,6 +42,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.config import load_config, save_config
+from app.core.logging_config import LOG_DIR, LOG_FILE
 from app.core.models import ComicMetadata, ImportResult, LightBookError, MangaDirection
 from app.ai.config import AiProviderConfig, load_ai_provider_config, save_ai_provider_config
 from app.ai.openai_compatible_provider import AiProviderConfigError, OpenAICompatibleProvider
@@ -54,6 +56,8 @@ from app.importers.image_folder_importer import import_image_folder
 from app.importers.novel_txt_importer import NovelImportResult, import_novel_txt
 from app.parsers.novel_chapter_parser import NovelChapter
 from app.services.batch_export_service import export_book_from_database, export_novel_preview_from_database
+from app.search.mock_search_provider import MockSearchProvider
+from app.search.web_search_service import MetadataSearchService
 from app.services.batch_import_service import batch_import
 from app.services.output_planner import plan_novel_output
 from app.storage.repositories import (
@@ -104,7 +108,6 @@ AI_APPLY_FIELDS = [
     ("series_status", "连载状态", False),
 ]
 BATCH_TABLE_COLUMNS = ["类型", "状态", "作品名", "卷号", "页数 / 章节数", "来源路径"]
-IMPORTANT_AI_FIELDS = {"clean_title", "book_title", "volume_number", "summary", "genres", "tags", "language_iso"}
 
 
 class MainWindow(QMainWindow):
@@ -123,12 +126,17 @@ class MainWindow(QMainWindow):
         self.current_ai_suggestion_id: int | None = None
         self.current_ai_suggestion_row: RowDict | None = None
 
+        self._install_exception_hook()
+
         self._create_single_import_widgets()
         self._create_batch_widgets()
         self._create_settings_widgets()
         self._build_ui()
+        self._apply_flat_style()
         self._refresh_output_labels()
         self._refresh_batch_table()
+
+        logger.info("GUI 窗口已创建")
 
     def _create_single_import_widgets(self) -> None:
         self.source_label = QLabel("未选择")
@@ -186,8 +194,8 @@ class MainWindow(QMainWindow):
         self.batch_author_edit = QLineEdit()
         self.batch_translator_edit = QLineEdit()
         self.batch_summary_edit = QTextEdit()
-        self.batch_summary_edit.setMinimumHeight(140)
-        self.batch_summary_edit.setMaximumHeight(220)
+        self.batch_summary_edit.setMinimumHeight(180)
+        self.batch_summary_edit.setMaximumHeight(320)
         self.batch_genres_edit = QLineEdit()
         self.batch_tags_edit = QLineEdit()
         self.batch_language_edit = QLineEdit("zh")
@@ -200,7 +208,9 @@ class MainWindow(QMainWindow):
         self.batch_clear_cover_button.clicked.connect(self._clear_batch_cover)
         self.batch_cover_preview_label = QLabel()
         self.batch_cover_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.batch_cover_preview_label.setMinimumSize(120, 160)
+        self.batch_cover_preview_label.setMinimumSize(120, 120)
+        self.batch_cover_preview_label.setMaximumHeight(160)
+        self.batch_cover_preview_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.batch_cover_preview_label.setStyleSheet("border: 1px solid #cccccc; background: #fafafa;")
 
         self.batch_chapter_label = QLabel("章节列表")
@@ -235,6 +245,8 @@ class MainWindow(QMainWindow):
         self.ai_ignore_button.clicked.connect(self._ignore_ai_suggestion)
         self.ai_raw_response_button = QPushButton("查看原始响应")
         self.ai_raw_response_button.clicked.connect(self._show_ai_raw_response)
+        self.ai_search_button = QPushButton("搜索封面/资料")
+        self.ai_search_button.clicked.connect(self._search_cover_and_metadata)
         self.ai_status_label = QLabel("AI 只提供建议，不会自动覆盖数据。")
         self.ai_suggestion_table = QTableWidget(0, 4)
         self.ai_suggestion_table.setHorizontalHeaderLabels(["字段", "当前值", "AI 建议", "应用"])
@@ -281,11 +293,153 @@ class MainWindow(QMainWindow):
         self.settings_output_label = QLabel("未选择")
 
     def _build_ui(self) -> None:
+        self._build_menu_bar()
         tabs = QTabWidget()
         tabs.addTab(self._build_single_import_tab(), "单本导入")
         tabs.addTab(self._build_batch_tab(), "批量整理")
         tabs.addTab(self._build_settings_tab(), "设置")
         self.setCentralWidget(tabs)
+
+    def _apply_flat_style(self) -> None:
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #f5f5f5;
+            }
+            QGroupBox {
+                border: 1px solid #d8d8d8;
+                border-radius: 6px;
+                margin-top: 12px;
+                padding-top: 14px;
+                font-size: 13px;
+                font-weight: bold;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 6px;
+                color: #555;
+            }
+            QPushButton {
+                background-color: #ffffff;
+                border: 1px solid #c8c8c8;
+                border-radius: 4px;
+                padding: 5px 14px;
+                font-size: 13px;
+                min-height: 26px;
+            }
+            QPushButton:hover {
+                background-color: #e8e8e8;
+                border-color: #a0a0a0;
+            }
+            QPushButton:pressed {
+                background-color: #d8d8d8;
+            }
+            QLineEdit {
+                border: 1px solid #c8c8c8;
+                border-radius: 4px;
+                padding: 5px 8px;
+                font-size: 13px;
+                background-color: #ffffff;
+            }
+            QLineEdit:focus {
+                border-color: #7eb8e0;
+            }
+            QTextEdit {
+                border: 1px solid #c8c8c8;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 13px;
+                background-color: #ffffff;
+            }
+            QTextEdit:focus {
+                border-color: #7eb8e0;
+            }
+            QComboBox {
+                border: 1px solid #c8c8c8;
+                border-radius: 4px;
+                padding: 5px 8px;
+                font-size: 13px;
+                background-color: #ffffff;
+            }
+            QTableWidget {
+                font-size: 13px;
+                background-color: #ffffff;
+                alternate-background-color: #f9f9f9;
+                gridline-color: #e8e8e8;
+            }
+            QTableWidget::item {
+                padding: 6px 8px;
+            }
+            QTableWidget::item:selected {
+                background-color: #d8e8f8;
+                color: #222;
+            }
+            QHeaderView::section {
+                background-color: #f0f0f0;
+                border: 1px solid #d8d8d8;
+                padding: 6px 8px;
+                font-size: 13px;
+            }
+            QScrollArea {
+                border: none;
+            }
+            QTabWidget::pane {
+                border: 1px solid #d8d8d8;
+                background-color: #ffffff;
+            }
+            QTabBar::tab {
+                border: 1px solid #d8d8d8;
+                padding: 7px 18px;
+                font-size: 13px;
+                background-color: #ececec;
+            }
+            QTabBar::tab:selected {
+                background-color: #ffffff;
+                border-bottom-color: #ffffff;
+            }
+            QLabel {
+                font-size: 13px;
+            }
+            QSpinBox, QDoubleSpinBox {
+                border: 1px solid #c8c8c8;
+                border-radius: 4px;
+                padding: 5px 8px;
+                font-size: 13px;
+                background-color: #ffffff;
+            }
+        """)
+
+    def _install_exception_hook(self) -> None:
+        original_hook = sys.excepthook
+
+        def hook(exc_type: type, exc_value: BaseException, exc_tb: object) -> None:
+            logger.critical("未捕获异常", exc_info=(exc_type, exc_value, exc_tb))
+            original_hook(exc_type, exc_value, exc_tb)
+
+        sys.excepthook = hook
+
+    def _build_menu_bar(self) -> None:
+        menu_bar = self.menuBar()
+
+        help_menu = menu_bar.addMenu("帮助")
+
+        open_log_action = QAction("打开日志文件", self)
+        open_log_action.triggered.connect(self._open_log_file)
+        help_menu.addAction(open_log_action)
+
+        open_log_dir_action = QAction("打开日志目录", self)
+        open_log_dir_action.triggered.connect(self._open_log_dir)
+        help_menu.addAction(open_log_dir_action)
+
+    def _open_log_file(self) -> None:
+        if LOG_FILE.exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(LOG_FILE.resolve())))
+        else:
+            QMessageBox.information(self, "日志", f"日志文件尚不存在：\n{LOG_FILE.resolve()}")
+
+    def _open_log_dir(self) -> None:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(LOG_DIR.resolve())))
 
     def _build_single_import_tab(self) -> QWidget:
         choose_folder_button = QPushButton("选择图片文件夹")
@@ -353,21 +507,12 @@ class MainWindow(QMainWindow):
         scan_sources_button.clicked.connect(self._batch_scan_sources)
         refresh_button = QPushButton("刷新")
         refresh_button.clicked.connect(self._refresh_batch_table)
-        mark_ready_button = QPushButton("选中项标记可导出")
-        mark_ready_button.clicked.connect(lambda: self._mark_selected_batch_books("ready"))
-        mark_need_review_button = QPushButton("选中项标记待确认")
-        mark_need_review_button.clicked.connect(lambda: self._mark_selected_batch_books("need_review"))
-        delete_selected_button = QPushButton("删除选中项")
-        delete_selected_button.clicked.connect(self._delete_selected_batch_books)
 
         top_buttons = QHBoxLayout()
         top_buttons.addWidget(import_files_button)
         top_buttons.addWidget(import_folders_button)
         top_buttons.addWidget(scan_sources_button)
         top_buttons.addStretch()
-        top_buttons.addWidget(mark_ready_button)
-        top_buttons.addWidget(mark_need_review_button)
-        top_buttons.addWidget(delete_selected_button)
         top_buttons.addWidget(refresh_button)
 
         form = QFormLayout()
@@ -410,6 +555,7 @@ class MainWindow(QMainWindow):
         ai_buttons.addWidget(self.ai_apply_button)
         ai_buttons.addWidget(self.ai_ignore_button)
         ai_buttons.addWidget(self.ai_raw_response_button)
+        ai_buttons.addWidget(self.ai_search_button)
         ai_group = QGroupBox("AI 辅助")
         ai_layout = QVBoxLayout()
         ai_layout.addLayout(ai_buttons)
@@ -439,8 +585,8 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(self.batch_table)
         splitter.addWidget(detail_scroll)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        splitter.setStretchFactor(0, 11)
+        splitter.setStretchFactor(1, 9)
 
         root = QVBoxLayout()
         root.addLayout(top_buttons)
@@ -1414,7 +1560,7 @@ class MainWindow(QMainWindow):
         for field_name, field_label, can_apply in AI_APPLY_FIELDS:
             current_value = self._current_ai_field_value(field_name)
             suggested_value = _display_ai_value(parsed.get(field_name))
-            if not suggested_value and not (field_name in IMPORTANT_AI_FIELDS and not current_value):
+            if not suggested_value and not current_value:
                 continue
 
             self.ai_suggestion_table.insertRow(row_index)
@@ -1492,6 +1638,39 @@ class MainWindow(QMainWindow):
         parsed_text = json.dumps(parsed_json, ensure_ascii=False, indent=2)[:3000]
         message = f"Raw response（前 3000 字）：\n{raw_response}\n\nParsed JSON：\n{parsed_text}"
         QMessageBox.information(self, "AI 原始响应", message)
+
+    def _search_cover_and_metadata(self) -> None:
+        book_id = self.current_batch_book_id
+        if book_id is None:
+            self._show_error("请先选择一个 book。")
+            return
+
+        try:
+            service = MetadataSearchService(_GuiAiRepository(), MockSearchProvider())
+            candidates = service.search_for_book(book_id)
+        except Exception as exc:
+            logger.exception("Metadata search failed")
+            self._show_error(f"搜索失败：{exc}")
+            return
+
+        if not candidates:
+            QMessageBox.information(self, "搜索封面/资料", "未找到匹配结果。")
+            return
+
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("搜索结果")
+        dialog.setIcon(QMessageBox.Icon.Information)
+        lines = [f"找到 {len(candidates)} 个结果：\n"]
+        for i, c in enumerate(candidates, 1):
+            lines.append(
+                f"{i}. {c.title}  —  {c.source_name}\n"
+                f"   作者：{', '.join(c.authors) if c.authors else '未知'}\n"
+                f"   简介：{c.summary[:80]}{'...' if len(c.summary) > 80 else ''}\n"
+                f"   分类：{', '.join(c.genres) if c.genres else '无'}\n"
+                f"   标签：{', '.join(c.tags) if c.tags else '无'}\n"
+            )
+        dialog.setText("\n".join(lines))
+        dialog.exec()
 
     def _set_novel_chapter_widgets_visible(self, visible: bool) -> None:
         for widget in (

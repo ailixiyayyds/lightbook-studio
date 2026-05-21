@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
 
 class AiMetadataValidationError(ValueError):
     """Raised when AI metadata cannot be normalized into the expected schema."""
+
+
+_LOW_QUALITY_PATTERNS = [
+    re.compile(r"这是第\s*\d+\s*卷"),
+    re.compile(r"共\s*\d+\s*页"),
+    re.compile(r"元数据建议"),
+    re.compile(r"metadata\s+suggestion", re.IGNORECASE),
+]
 
 
 _MANGA_DIRECTIONS = {"rtl", "ltr", "webtoon", "unknown"}
@@ -71,14 +80,14 @@ def validate_ai_metadata(data: dict[str, Any]) -> dict[str, Any]:
     if "field_confidence" in data:
         result["field_confidence"] = _field_confidence(data["field_confidence"])
 
-    manga_direction = str(result["manga_direction"]).casefold()
+    manga_direction = str(result["manga_direction"]).strip().casefold()
     if manga_direction not in _MANGA_DIRECTIONS:
-        raise AiMetadataValidationError(f"Invalid manga_direction: {result['manga_direction']}")
+        manga_direction = "unknown"
     result["manga_direction"] = manga_direction
 
-    series_status = str(result["series_status"]).casefold()
+    series_status = str(result["series_status"]).strip().casefold()
     if series_status not in _SERIES_STATUSES:
-        raise AiMetadataValidationError(f"Invalid series_status: {result['series_status']}")
+        series_status = "unknown"
     result["series_status"] = series_status
 
     return result
@@ -144,3 +153,19 @@ def _field_confidence(value: Any) -> dict[str, float]:
             continue
         result[field_name] = _clamped_float(raw_value, f"field_confidence.{field_name}")
     return result
+
+
+def check_summary_quality(summary: str) -> dict[str, Any]:
+    """Check if a summary looks low-quality (boilerplate instead of story description).
+
+    Returns a dict with:
+      - is_low_quality: bool
+      - reasons: list of matched patterns
+    """
+    if not summary or not summary.strip():
+        return {"is_low_quality": False, "reasons": []}
+    reasons: list[str] = []
+    for pattern in _LOW_QUALITY_PATTERNS:
+        if pattern.search(summary):
+            reasons.append(pattern.pattern)
+    return {"is_low_quality": len(reasons) > 0, "reasons": reasons}

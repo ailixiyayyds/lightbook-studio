@@ -45,6 +45,20 @@ def build_ai_metadata_request(book_id: int, repository: MetadataRepository) -> A
 
     page_count = int(book.get("page_count") or 0) if media_type == "comic" else None
 
+    search_candidates: list[dict[str, Any]] = []
+    raw_search = book.get("search_candidates")
+    if isinstance(raw_search, list):
+        search_candidates = raw_search
+    elif isinstance(raw_search, str):
+        import json
+
+        try:
+            parsed = json.loads(raw_search)
+            if isinstance(parsed, list):
+                search_candidates = parsed
+        except json.JSONDecodeError:
+            pass
+
     return AiMetadataRequest(
         book_id=book_id,
         media_type=media_type,
@@ -65,6 +79,7 @@ def build_ai_metadata_request(book_id: int, repository: MetadataRepository) -> A
                 "volume_number": _optional_int(book.get("volume_number")),
             },
             "chapter_count": int(book.get("chapter_count") or 0),
+            "search_candidates": search_candidates,
         },
         chapter_titles=chapter_titles,
         page_count=page_count,

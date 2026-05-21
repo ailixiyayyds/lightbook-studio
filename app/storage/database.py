@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 from typing import Final
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_DATABASE_PATH: Final[Path] = Path("data") / "lightbook.db"
 SCHEMA_PATH: Final[Path] = Path(__file__).with_name("schema.sql")
@@ -12,6 +15,7 @@ SCHEMA_PATH: Final[Path] = Path(__file__).with_name("schema.sql")
 def initialize_database(db_path: str | Path = DEFAULT_DATABASE_PATH) -> Path:
     database_path = Path(db_path)
     database_path.parent.mkdir(parents=True, exist_ok=True)
+    logger.info("数据库初始化开始 db_path=%s", database_path)
 
     schema = SCHEMA_PATH.read_text(encoding="utf-8")
     with closing(sqlite3.connect(database_path)) as connection:
@@ -20,6 +24,7 @@ def initialize_database(db_path: str | Path = DEFAULT_DATABASE_PATH) -> Path:
         _migrate_database(connection)
         connection.commit()
 
+    logger.info("数据库初始化完成 db_path=%s", database_path)
     return database_path
 
 
@@ -58,6 +63,7 @@ def _ensure_column(
         for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
     }
     if column_name not in columns:
+        logger.info("数据库迁移 添加列 table=%s column=%s", table_name, column_name)
         connection.execute(
             f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
         )

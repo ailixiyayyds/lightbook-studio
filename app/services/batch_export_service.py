@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
 from app.core.models import ComicMetadata, ExporterError, MangaDirection
+
+logger = logging.getLogger(__name__)
 from app.exporters.cbz_exporter import export_cbz
 from app.importers.cbz_importer import import_cbz
 from app.importers.comic_epub_importer import import_comic_epub
@@ -29,14 +32,23 @@ def export_book_from_database(
         update_book(book_id, status="failed", db_path=db_path)
         raise ExporterError(f"book {book_id} 找不到对应 work。")
 
+    is_novel = _is_novel_book(book)
+    logger.info(
+        "导出开始 book_id=%s media_type=%s output_root=%s",
+        book_id,
+        "novel" if is_novel else "comic",
+        output_root,
+    )
     try:
-        if _is_novel_book(book):
+        if is_novel:
             output_path = _export_novel_book(book, work, output_root, db_path)
         else:
             output_path = _export_manga_book(book, work, output_root)
         update_book(book_id, status="exported", db_path=db_path)
+        logger.info("导出成功 book_id=%s output_path=%s", book_id, output_path)
         return output_path
     except Exception:
+        logger.exception("导出失败 book_id=%s", book_id)
         update_book(book_id, status="failed", db_path=db_path)
         raise
 

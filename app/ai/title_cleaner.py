@@ -11,6 +11,9 @@ _VOLUME_PATTERNS = [
     re.compile(r"\s*卷\s*\d+\s*$", re.IGNORECASE),
     re.compile(r"\s*v(?:ol(?:ume)?\.?)?\s*\d+\s*$", re.IGNORECASE),
 ]
+_VOLUME_PREFIX_PATTERNS = [
+    re.compile(r"^\s*Vol\.?\s*\d+\s+", re.IGNORECASE),
+]
 
 
 def clean_release_title(raw: str) -> str:
@@ -23,6 +26,7 @@ def clean_release_title(raw: str) -> str:
     text = _prefer_title_bracket_when_rest_is_volume(text)
     text = _strip_remaining_noise_brackets(text)
     text = _strip_volume_suffix(text)
+    text = _strip_volume_prefix(text)
     return _normalize_spaces(text)
 
 
@@ -53,6 +57,8 @@ def _prefer_title_bracket_when_rest_is_volume(text: str) -> str:
     rest = (text[: match.start()] + text[match.end() :]).strip()
     if content and rest and not _strip_volume_suffix(rest):
         return content
+    if content and not rest and not _is_noise_marker(content):
+        return content
     return text
 
 
@@ -68,6 +74,13 @@ def _strip_remaining_noise_brackets(text: str) -> str:
             result = rest
         else:
             return result
+
+
+def _strip_volume_prefix(text: str) -> str:
+    result = str(text)
+    for pattern in _VOLUME_PREFIX_PATTERNS:
+        result = pattern.sub("", result)
+    return result
 
 
 def _strip_volume_suffix(text: str) -> str:

@@ -21,6 +21,13 @@ def export_cbz(
     if not import_result.pages:
         raise ExporterError("没有可导出的页面。")
 
+    logger.info(
+        "CBZ 导出开始 source=%s pages=%s output_root=%s",
+        import_result.source_path,
+        len(import_result.pages),
+        output_root,
+    )
+
     metadata_to_write = metadata or import_result.metadata
     series_title = metadata_to_write.series_title or import_result.metadata.series_title or "Untitled"
     safe_series_title = sanitize_windows_filename(series_title)

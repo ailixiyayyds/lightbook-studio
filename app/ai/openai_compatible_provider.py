@@ -21,18 +21,33 @@ DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_API_KEY_ENV = "LIGHTBOOK_AI_API_KEY"
 SYSTEM_PROMPT = (
-    "你是一个漫画与轻小说元数据整理助手。你的任务不是复读输入，而是清洗标题、"
-    "去除发布组标记、推断规范元数据。你只能根据用户提供的信息合理推测，不确定的信息"
-    "留空或使用 unknown，不允许编造。你必须只输出 JSON，不要输出解释、Markdown、代码块或额外文本。"
-    "必须去除标题中的来源组、发布组、下载站标记，例如 [Kome]、[Kmoe]、[汉化]、[DL]、[自购]。"
-    "必须去除卷号、文件扩展名、页数等噪声。clean_title 必须是干净作品名。"
-    "book_title 应该是卷标题，例如“第 04 卷”或“卷04”，不要带发布组标记。"
-    "genres 是大分类，例如 漫画、百合、校园、恋爱、日常、喜剧、奇幻、战斗、悬疑、科幻。"
-    "tags 是具体标签，例如 女校、社团、青春、暗恋、同学、音乐、异世界、转生、魔法、战斗。"
-    "如果无法根据输入判断 tags，可以基于标题和已有简介给出保守标签，但不要乱编剧情。"
-    "summary 不能复读“元数据建议，共 N 页”。如果信息不足，就写一句中性的书库简介，"
-    "例如“本卷为《作品名》的第 N 卷。”。language_iso 和 manga_direction 默认保留输入值。"
-    "JSON 必须符合用户提供的 schema。"
+    "你是一个漫画与轻小说元数据整理助手。你的任务是根据用户提供的标题、文件名、作者、"
+    "章节标题、正文样本、已有简介和搜索候选资料，整理出适合个人数字书库使用的元数据。"
+    "你不是复读输入，而是要清洗噪声、规范标题、补全分类和标签，并生成自然的故事简介。"
+    "\n\n"
+    "严格规则：\n"
+    "1. 只能输出 JSON，不要输出解释、Markdown、代码块或额外文字。\n"
+    "2. 不确定的信息用空字符串、空数组或 unknown，不要编造。\n"
+    "3. 去除标题中的下载站、发布组、汉化组、文件来源标记，例如 [Kome]、[Kmoe]、[汉化]、[自购]、[DL]。\n"
+    "4. clean_title 必须是干净作品名，不包含卷号、页数、文件扩展名。\n"
+    '5. book_title 应该是“第 01 卷”“第 02 卷”这种卷标题，不要包含发布组标记。\n'
+    '6. summary 必须优先写故事简介。不要写“这是第 N 卷”“共 N 页”“漫画元数据建议”这类无意义文本。\n'
+    "7. 如果没有足够剧情信息，可以写保守简介或留空，但不能编造具体剧情。\n"
+    "8. genres 是大分类，数量 2 到 5 个。\n"
+    "9. tags 是具体元素，数量 3 到 10 个。\n"
+    "10. genres 和 tags 不要重复。\n"
+    "11. language_iso 和 manga_direction 默认保留输入值。\n"
+    "12. 不要把作者、语言、页数、卷号当成 tag。\n"
+    "\n"
+    "genres 可选范围（大分类）：漫画、轻小说、百合、恋爱、校园、日常、喜剧、奇幻、"
+    "异世界、科幻、悬疑、推理、战斗、冒险、青春、治愈、历史、运动、音乐、偶像、职场、"
+    "家庭、社会、恐怖\n"
+    "\n"
+    "tags 是具体元素（示例）：暗恋、同学、女校、社团、日常向、恋爱喜剧、青梅竹马、"
+    "群像、成长、重生、转生、魔法学院、机战、吸血鬼、悬疑解谜、青春恋爱\n"
+    "\n"
+    'genres 和 tags 的区别：genres 回答“这是什么类型的作品”（大类），'
+    'tags 回答“作品里有什么具体元素”（细粒度标签）。两者内容不应重复。'
 )
 TEST_SYSTEM_PROMPT = "你必须只输出 JSON，不要输出解释、Markdown、代码块或额外文本。"
 TEST_USER_PROMPT = '请只输出这个 JSON：{"ok": true}'
@@ -261,16 +276,22 @@ def _user_prompt_payload(request: AiMetadataRequest) -> dict[str, Any]:
     return {
         "instruction": "请完成元数据清洗和整理任务，最终只返回一个符合 schema_example 的 JSON 对象。",
         "schema_example": AI_METADATA_SCHEMA_EXAMPLE,
-        "cleaning_task": {
-            "goal": "清洗发布组和下载站噪声，生成适合本地书库展示的漫画/轻小说元数据建议。",
-            "prefer_local_clean_guess": "如果 local_clean_guess 合理，应优先采用。",
-            "summary_rule": "不要复读页数或“元数据建议”。信息不足时写中性简介。",
+        "genres_vs_tags": {
+            'genres_definition': 'genres 是大分类，回答“这是什么类型的作品”，数量 2~5 个。',
+            'tags_definition': 'tags 是具体元素，回答“作品里有什么”，数量 3~10 个。',
+            "no_overlap": "genres 和 tags 的内容不应重复。",
+            "not_tags": "不要把作者、语言、页数、卷号当成 tag。",
+        },
+        "summary_rule": {
+            "priority": "必须优先写故事简介，描述作品讲的是什么故事。",
+            'forbidden': '禁止输出“这是第 N 卷”“共 N 页”“漫画元数据建议”等无意义文本。',
+            'fallback': '如果正文样本不足以推断剧情，可写保守简介（如“《作品名》系列第 N 卷”）或留空。',
         },
         "rules": [
             "Do not invent unknown facts or plot details.",
             "Remove release group markers, website tags, file extensions, page counts, and volume suffixes from clean_title.",
             "Use local_clean_guess when it is consistent with the raw input.",
-            "For comic items without text_sample, still clean titles and provide conservative genres/tags.",
+            "For comic items without text_sample, still clean titles and provide conservative genres/tags based on title and existing metadata.",
             "Preserve language_iso and manga_direction unless the input clearly indicates otherwise.",
             "Use empty strings, empty lists, null, or unknown for uncertain fields.",
             "manga_direction must be rtl, ltr, webtoon, or unknown.",
@@ -294,6 +315,7 @@ def _user_prompt_payload(request: AiMetadataRequest) -> dict[str, Any]:
             "chapter_titles": request.chapter_titles[:80],
             "text_sample": request.text_sample[:5000],
             "local_clean_guess": source_info.get("local_clean_guess", {}),
+            "search_candidates": source_info.get("search_candidates", []),
         },
         "context": context,
     }

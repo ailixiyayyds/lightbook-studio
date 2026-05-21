@@ -66,6 +66,37 @@ def test_validate_ai_metadata_clamps_confidence() -> None:
     assert low["confidence"] == 0.0
 
 
-def test_validate_ai_metadata_rejects_invalid_manga_direction() -> None:
-    with pytest.raises(AiMetadataValidationError, match="manga_direction"):
-        validate_ai_metadata({"manga_direction": "diagonal"})
+def test_validate_ai_metadata_defaults_invalid_manga_direction_to_unknown() -> None:
+    result = validate_ai_metadata({"manga_direction": "diagonal"})
+    assert result["manga_direction"] == "unknown"
+
+
+def test_validate_ai_metadata_defaults_invalid_series_status_to_unknown() -> None:
+    result = validate_ai_metadata({"series_status": "cancelled"})
+    assert result["series_status"] == "unknown"
+
+
+def test_validate_ai_metadata_accepts_string_genres() -> None:
+    result = validate_ai_metadata({"genres": "漫画, 百合, 校园"})
+    assert result["genres"] == ["漫画", "百合", "校园"]
+
+
+def test_validate_ai_metadata_accepts_string_authors() -> None:
+    result = validate_ai_metadata({"authors": "池田學志, 作者B"})
+    assert result["authors"] == ["池田學志", "作者B"]
+
+
+def test_check_summary_quality_detects_boilerplate() -> None:
+    from app.ai.metadata_schema import check_summary_quality
+
+    assert check_summary_quality("这是第04卷")["is_low_quality"] is True
+    assert check_summary_quality("共 166 页")["is_low_quality"] is True
+    assert check_summary_quality("漫画元数据建议")["is_low_quality"] is True
+    assert check_summary_quality("")["is_low_quality"] is False
+
+
+def test_check_summary_quality_passes_real_summary() -> None:
+    from app.ai.metadata_schema import check_summary_quality
+
+    result = check_summary_quality("主角是一个普通高中生，某天遇到了来自异世界的少女。")
+    assert result["is_low_quality"] is False

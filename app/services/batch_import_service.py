@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.core.models import ImportResult
+
+logger = logging.getLogger(__name__)
 from app.importers.cbz_importer import import_cbz
 from app.importers.comic_epub_importer import import_comic_epub
 from app.importers.image_folder_importer import import_image_folder
@@ -41,6 +44,7 @@ def batch_import(
     image_folder_importer: Importer = import_image_folder,
     novel_txt_importer: NovelImporter = import_novel_txt,
 ) -> BatchImportResult:
+    logger.info("批量导入开始 count=%s", len(paths))
     errors: list[str] = []
     book_ids: list[int] = []
     work_cache = _load_work_cache(db_path)
@@ -48,6 +52,7 @@ def batch_import(
     for source_path in paths:
         path = Path(source_path)
         try:
+            logger.info("导入文件 path=%s", path)
             if path.suffix.casefold() == ".txt" and not path.is_dir():
                 novel_result = novel_txt_importer(path)
                 book = _create_novel_book(path, novel_result, work_cache, db_path)
@@ -73,8 +78,14 @@ def batch_import(
                 )
             book_ids.append(int(book["id"]))
         except Exception as exc:
+            logger.warning("导入失败 path=%s error=%s", path, exc)
             errors.append(f"{path}: {exc}")
 
+    logger.info(
+        "批量导入完成 imported=%s failed=%s",
+        len(book_ids),
+        len(errors),
+    )
     return BatchImportResult(
         imported_count=len(book_ids),
         failed_count=len(errors),
