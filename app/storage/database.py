@@ -11,9 +11,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_DATABASE_PATH: Final[Path] = Path("data") / "lightbook.db"
 SCHEMA_PATH: Final[Path] = Path(__file__).with_name("schema.sql")
 
+_initialized_paths: set[str] = set()
+
 
 def initialize_database(db_path: str | Path = DEFAULT_DATABASE_PATH) -> Path:
     database_path = Path(db_path)
+    key = str(database_path.resolve())
+
+    if key in _initialized_paths:
+        return database_path
+
     database_path.parent.mkdir(parents=True, exist_ok=True)
     logger.info("数据库初始化开始 db_path=%s", database_path)
 
@@ -24,6 +31,7 @@ def initialize_database(db_path: str | Path = DEFAULT_DATABASE_PATH) -> Path:
         _migrate_database(connection)
         connection.commit()
 
+    _initialized_paths.add(key)
     logger.info("数据库初始化完成 db_path=%s", database_path)
     return database_path
 
@@ -46,6 +54,8 @@ def _migrate_database(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "books", "cover_override_path", "TEXT DEFAULT ''")
     _ensure_novel_chapters_table(connection)
     _ensure_ai_suggestions_table(connection)
+    _ensure_metadata_search_results_table(connection)
+    _ensure_ai_request_logs_table(connection)
     _ensure_index(connection, "idx_books_media_type", "books", "media_type")
     _ensure_index(connection, "idx_novel_chapters_book_id", "novel_chapters", "book_id")
     _ensure_index(connection, "idx_ai_suggestions_book_id", "ai_suggestions", "book_id")
@@ -113,6 +123,48 @@ def _ensure_ai_suggestions_table(connection: sqlite3.Connection) -> None:
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
           FOREIGN KEY(book_id) REFERENCES books(id)
+        )
+        """
+    )
+
+
+def _ensure_metadata_search_results_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS metadata_search_results (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          book_id INTEGER NOT NULL,
+          provider TEXT NOT NULL DEFAULT '',
+          query_snapshot TEXT NOT NULL DEFAULT '{}',
+          diagnostics_json TEXT NOT NULL DEFAULT '{}',
+          candidates_json TEXT NOT NULL DEFAULT '[]',
+          status TEXT NOT NULL DEFAULT 'completed',
+          error_message TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(book_id) REFERENCES books(id)
+        )
+        """
+    )
+
+
+def _ensure_ai_request_logs_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_request_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          book_id INTEGER,
+          task_id TEXT NOT NULL,
+          request_type TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          model TEXT NOT NULL DEFAULT '',
+          request_json TEXT NOT NULL DEFAULT '{}',
+          response_text TEXT NOT NULL DEFAULT '',
+          parsed_json TEXT NOT NULL DEFAULT '{}',
+          status TEXT NOT NULL,
+          error_message TEXT NOT NULL DEFAULT '',
+          duration_ms INTEGER DEFAULT 0,
+          created_at TEXT NOT NULL
         )
         """
     )

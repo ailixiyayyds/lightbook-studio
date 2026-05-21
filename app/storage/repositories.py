@@ -5,7 +5,7 @@ import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from app.storage.database import DEFAULT_DATABASE_PATH, connect
 
@@ -220,6 +220,8 @@ def delete_book(
         connection.execute("DELETE FROM ai_suggestions WHERE book_id = ?", (book_id,))
         connection.execute("DELETE FROM novel_chapters WHERE book_id = ?", (book_id,))
         connection.execute("DELETE FROM export_jobs WHERE book_id = ?", (book_id,))
+        connection.execute("DELETE FROM metadata_search_results WHERE book_id = ?", (book_id,))
+        connection.execute("DELETE FROM ai_request_logs WHERE book_id = ?", (book_id,))
         cursor = connection.execute("DELETE FROM books WHERE id = ?", (book_id,))
         return cursor.rowcount > 0
 
@@ -244,6 +246,14 @@ def delete_books(
         )
         connection.execute(
             f"DELETE FROM export_jobs WHERE book_id IN ({placeholders})",
+            ids,
+        )
+        connection.execute(
+            f"DELETE FROM metadata_search_results WHERE book_id IN ({placeholders})",
+            ids,
+        )
+        connection.execute(
+            f"DELETE FROM ai_request_logs WHERE book_id IN ({placeholders})",
             ids,
         )
         cursor = connection.execute(
@@ -385,9 +395,9 @@ def create_ai_suggestion(
     book_id: int,
     provider: str,
     status: str = "pending",
-    input_snapshot: str | Mapping[str, Any] = "{}",
+    input_snapshot: Any = "{}",
     raw_response: str = "",
-    parsed_json: str | Mapping[str, Any] = "{}",
+    parsed_json: Any = "{}",
     confidence: float = 0,
     error_message: str = "",
     db_path: str | Path = DEFAULT_DATABASE_PATH,
@@ -424,9 +434,9 @@ def update_ai_suggestion(
     book_id: int | None = None,
     provider: str | None = None,
     status: str | None = None,
-    input_snapshot: str | Mapping[str, Any] | None = None,
+    input_snapshot: Any | None = None,
     raw_response: str | None = None,
-    parsed_json: str | Mapping[str, Any] | None = None,
+    parsed_json: Any | None = None,
     confidence: float | None = None,
     error_message: str | None = None,
     db_path: str | Path = DEFAULT_DATABASE_PATH,
@@ -504,6 +514,176 @@ def delete_ai_suggestions_by_book(
             "DELETE FROM ai_suggestions WHERE book_id = ?",
             (book_id,),
         )
+        return cursor.rowcount
+
+
+def delete_all_ai_suggestions(
+    *,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> int:
+    with closing(connect(db_path)) as connection, connection:
+        cursor = connection.execute("DELETE FROM ai_suggestions")
+        return cursor.rowcount
+
+
+def create_metadata_search_result(
+    *,
+    book_id: int,
+    provider: str = "",
+    query_snapshot: Any = "{}",
+    diagnostics_json: Any = "{}",
+    candidates_json: Any = "[]",
+    status: str = "completed",
+    error_message: str = "",
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> RowDict:
+    timestamp = _now()
+    with closing(connect(db_path)) as connection, connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO metadata_search_results (
+              book_id, provider, query_snapshot, diagnostics_json,
+              candidates_json, status, error_message, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (book_id, provider, _json_text(query_snapshot), _json_text(diagnostics_json),
+             _json_text(candidates_json), status, error_message, timestamp, timestamp),
+        )
+        return _get_required_by_id(connection, "metadata_search_results", int(cursor.lastrowid))
+
+
+def get_latest_metadata_search_result_by_book(
+    book_id: int,
+    *,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> RowDict | None:
+    with closing(connect(db_path)) as connection, connection:
+        row = connection.execute(
+            "SELECT * FROM metadata_search_results WHERE book_id = ? ORDER BY id DESC LIMIT 1",
+            (book_id,),
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def list_metadata_search_results_by_book(
+    book_id: int,
+    *,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+    limit: int = 50,
+) -> list[RowDict]:
+    with closing(connect(db_path)) as connection, connection:
+        rows = connection.execute(
+            """
+            SELECT * FROM metadata_search_results
+            WHERE book_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (book_id, limit),
+        ).fetchall()
+        return [_row_to_dict_required(row) for row in rows]
+
+
+def delete_metadata_search_results_by_book(
+    book_id: int,
+    *,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> int:
+    with closing(connect(db_path)) as connection, connection:
+        cursor = connection.execute(
+            "DELETE FROM metadata_search_results WHERE book_id = ?",
+            (book_id,),
+        )
+        return cursor.rowcount
+
+
+def delete_all_metadata_search_results(
+    *,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> int:
+    with closing(connect(db_path)) as connection, connection:
+        cursor = connection.execute("DELETE FROM metadata_search_results")
+        return cursor.rowcount
+
+
+def create_ai_request_log(
+    *,
+    book_id: int | None,
+    task_id: str,
+    request_type: str,
+    provider: str,
+    model: str = "",
+    request_json: Any = "{}",
+    response_text: str = "",
+    parsed_json: Any = "{}",
+    status: str = "",
+    error_message: str = "",
+    duration_ms: int = 0,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> RowDict:
+    timestamp = _now()
+    with closing(connect(db_path)) as connection, connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO ai_request_logs (
+              book_id, task_id, request_type, provider, model,
+              request_json, response_text, parsed_json,
+              status, error_message, duration_ms, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (book_id, task_id, request_type, provider, model,
+             _json_text(request_json), response_text[:20000], _json_text(parsed_json),
+             status, error_message, duration_ms, timestamp),
+        )
+        return _get_required_by_id(connection, "ai_request_logs", int(cursor.lastrowid))
+
+
+def list_ai_request_logs_by_book(
+    book_id: int,
+    *,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+    limit: int = 50,
+) -> list[RowDict]:
+    with closing(connect(db_path)) as connection, connection:
+        rows = connection.execute(
+            "SELECT * FROM ai_request_logs WHERE book_id = ? ORDER BY id DESC LIMIT ?",
+            (book_id, limit),
+        ).fetchall()
+        return [_row_to_dict_required(r) for r in rows]
+
+
+def list_ai_request_logs(
+    *,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+    limit: int = 100,
+) -> list[RowDict]:
+    with closing(connect(db_path)) as connection, connection:
+        rows = connection.execute(
+            "SELECT * FROM ai_request_logs ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_row_to_dict_required(row) for row in rows]
+
+
+def delete_ai_request_logs_by_book(
+    book_id: int,
+    *,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> int:
+    with closing(connect(db_path)) as connection, connection:
+        cursor = connection.execute(
+            "DELETE FROM ai_request_logs WHERE book_id = ?",
+            (book_id,),
+        )
+        return cursor.rowcount
+
+
+def delete_all_ai_request_logs(
+    *,
+    db_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> int:
+    with closing(connect(db_path)) as connection, connection:
+        cursor = connection.execute("DELETE FROM ai_request_logs")
         return cursor.rowcount
 
 
@@ -622,7 +802,7 @@ def _placeholders(values: list[int]) -> str:
     return ", ".join("?" for _ in values)
 
 
-def _json_text(value: str | Mapping[str, Any]) -> str:
+def _json_text(value: Any) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False, sort_keys=True)

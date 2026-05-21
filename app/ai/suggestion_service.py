@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import asdict
 from typing import Any, Protocol
 
@@ -58,6 +59,22 @@ class AiSuggestionRepository(Protocol):
         manga_direction: str | None = None,
     ) -> dict[str, Any] | None: ...
 
+    def create_ai_request_log(
+        self,
+        *,
+        book_id: int | None,
+        task_id: str,
+        request_type: str,
+        provider: str,
+        model: str = "",
+        request_json: Any = "{}",
+        response_text: str = "",
+        parsed_json: Any = "{}",
+        status: str = "",
+        error_message: str = "",
+        duration_ms: int = 0,
+    ) -> dict[str, Any]: ...
+
 
 class AiSuggestionServiceError(LightBookError):
     """Raised when AI metadata suggestions cannot be generated or applied."""
@@ -72,6 +89,7 @@ class AiSuggestionService:
         input_snapshot: dict[str, Any] = {}
         raw_response = ""
         provider_name = getattr(self.provider, "name", self.provider.__class__.__name__)
+        started = time.perf_counter()
         try:
             request = build_ai_metadata_request(book_id, self.repository)
             input_snapshot = asdict(request)
@@ -88,6 +106,16 @@ class AiSuggestionService:
             response = self.provider.suggest_metadata(request)
             raw_response = response.raw_text
             parsed = validate_ai_metadata(response.parsed)
+            self._create_request_log(
+                book_id=book_id,
+                provider=response.provider or provider_name,
+                input_snapshot=input_snapshot,
+                raw_response=response.raw_text,
+                parsed=parsed,
+                status="completed",
+                error_message="",
+                duration_ms=_elapsed_ms(started),
+            )
             row = self.repository.create_ai_suggestion(
                 book_id=book_id,
                 provider=response.provider or provider_name,
@@ -106,6 +134,16 @@ class AiSuggestionService:
             )
             return _metadata_suggestion_from_dict(parsed)
         except Exception as exc:
+            self._create_request_log(
+                book_id=book_id,
+                provider=provider_name,
+                input_snapshot=input_snapshot,
+                raw_response=raw_response,
+                parsed={},
+                status="failed",
+                error_message=str(exc),
+                duration_ms=_elapsed_ms(started),
+            )
             row = self.repository.create_ai_suggestion(
                 book_id=book_id,
                 provider=provider_name,
@@ -124,6 +162,38 @@ class AiSuggestionService:
                 str(exc),
             )
             raise AiSuggestionServiceError(f"AI metadata suggestion failed for book {book_id}: {exc}") from exc
+
+    def _create_request_log(
+        self,
+        *,
+        book_id: int,
+        provider: str,
+        input_snapshot: dict[str, Any],
+        raw_response: str,
+        parsed: dict[str, Any],
+        status: str,
+        error_message: str,
+        duration_ms: int,
+    ) -> None:
+        create_log = getattr(self.repository, "create_ai_request_log", None)
+        if create_log is None:
+            return
+        try:
+            create_log(
+                book_id=book_id,
+                task_id=f"metadata_suggestion:{book_id}",
+                request_type="metadata_suggestion",
+                provider=provider,
+                model=_provider_model(self.provider),
+                request_json=input_snapshot,
+                response_text=raw_response[:20000],
+                parsed_json=parsed,
+                status=status,
+                error_message=error_message,
+                duration_ms=duration_ms,
+            )
+        except Exception:
+            logger.exception("Failed to write AI request log book_id=%s", book_id)
 
     def apply_suggestion(self, book_id: int, suggestion_id: int, fields: list[str]) -> None:
         selected_fields = set(fields)
@@ -218,3 +288,15 @@ def _json_object(value: Any) -> dict[str, Any]:
 
 def _join_list(values: list[str]) -> str:
     return ", ".join(values)
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, int((time.perf_counter() - started) * 1000))
+
+
+def _provider_model(provider: BaseAiProvider) -> str:
+    for attr in ("model", "_model"):
+        value = getattr(provider, attr, "")
+        if value:
+            return str(value)
+    return ""

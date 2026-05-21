@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+from logging.handlers import RotatingFileHandler
 
 import pytest
 
@@ -24,6 +25,10 @@ def test_setup_logging_creates_log_file(tmp_path, monkeypatch):
 
     assert (log_dir / "lightbook.log").exists()
     assert (log_dir / "lightbook.log").stat().st_size > 0
+    file_handlers = [handler for handler in logging.getLogger().handlers if isinstance(handler, RotatingFileHandler)]
+    assert file_handlers
+    assert file_handlers[0].maxBytes == 5 * 1024 * 1024
+    assert file_handlers[0].backupCount == 10
 
 
 def test_setup_logging_does_not_add_duplicate_handlers(tmp_path, monkeypatch):

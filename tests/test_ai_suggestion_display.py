@@ -23,7 +23,7 @@ def test_import_buttons_are_consolidated() -> None:
     assert "扫描目录" in source
     assert "选中项标记可导出" not in source
     assert "选中项标记待确认" not in source
-    assert "删除选中项" not in source
+    assert "删除选中项" in source
 
 
 def test_internal_state_values_are_not_polluted_by_chinese() -> None:

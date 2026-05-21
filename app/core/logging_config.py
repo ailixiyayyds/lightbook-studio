@@ -8,7 +8,7 @@ from pathlib import Path
 LOG_DIR = Path("logs")
 LOG_FILE = LOG_DIR / "lightbook.log"
 MAX_BYTES = 5 * 1024 * 1024
-BACKUP_COUNT = 5
+BACKUP_COUNT = 10
 
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 

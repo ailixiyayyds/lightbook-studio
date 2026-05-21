@@ -82,5 +82,38 @@ CREATE INDEX IF NOT EXISTS idx_books_status ON books(status);
 CREATE INDEX IF NOT EXISTS idx_novel_chapters_book_id ON novel_chapters(book_id);
 CREATE INDEX IF NOT EXISTS idx_ai_suggestions_book_id ON ai_suggestions(book_id);
 CREATE INDEX IF NOT EXISTS idx_ai_suggestions_status ON ai_suggestions(status);
+CREATE TABLE IF NOT EXISTS metadata_search_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id INTEGER NOT NULL,
+  provider TEXT NOT NULL DEFAULT '',
+  query_snapshot TEXT NOT NULL DEFAULT '{}',
+  diagnostics_json TEXT NOT NULL DEFAULT '{}',
+  candidates_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'completed',
+  error_message TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(book_id) REFERENCES books(id)
+);
+
+CREATE TABLE IF NOT EXISTS ai_request_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id INTEGER,
+  task_id TEXT NOT NULL,
+  request_type TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL DEFAULT '',
+  request_json TEXT NOT NULL DEFAULT '{}',
+  response_text TEXT NOT NULL DEFAULT '',
+  parsed_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL,
+  error_message TEXT NOT NULL DEFAULT '',
+  duration_ms INTEGER DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_export_jobs_book_id ON export_jobs(book_id);
 CREATE INDEX IF NOT EXISTS idx_export_jobs_status ON export_jobs(status);
+CREATE INDEX IF NOT EXISTS idx_metadata_search_results_book_id ON metadata_search_results(book_id);
+CREATE INDEX IF NOT EXISTS idx_ai_request_logs_book_id ON ai_request_logs(book_id);
+CREATE INDEX IF NOT EXISTS idx_ai_request_logs_task_id ON ai_request_logs(task_id);

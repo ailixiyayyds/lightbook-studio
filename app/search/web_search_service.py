@@ -196,6 +196,7 @@ def _build_query(book_id: int, repository: SearchRepository) -> MetadataSearchQu
         authors = [a.strip() for a in raw_author.split(",") if a.strip()]
 
     return MetadataSearchQuery(
+        book_id=book_id,
         title=str(work.get("title") or "").strip(),
         original_title=str(work.get("original_title") or "").strip(),
         authors=authors,
