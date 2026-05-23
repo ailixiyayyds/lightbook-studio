@@ -100,6 +100,71 @@ class _FailingProvider(BaseAiProvider):
         raise RuntimeError("boom")
 
 
+def test_metadata_content_extraction_writes_ai_request_log(tmp_path: Path) -> None:
+    db_path = tmp_path / "lightbook.db"
+    from app.search.content_extractor import MetadataContentExtractor
+    from app.search.types import MetadataSearchCandidate, MetadataSearchQuery
+
+    class _ExtractionProvider:
+        name = "test"
+        model = "test-model"
+
+        def extract_from_content(self, system_prompt: str, user_content: str) -> str:
+            return json.dumps({
+                "title": "Test",
+                "summary": "A test summary",
+                "genres": ["漫画"],
+                "tags": ["测试"],
+                "match_assessment": {"is_likely_same_work": True, "reason": "title match"},
+            })
+
+    repo = _Repository(db_path)
+    extractor = MetadataContentExtractor(_ExtractionProvider(), repo)
+    candidate = MetadataSearchCandidate(
+        title="Test",
+        raw_content="Some page content",
+        raw_content_type="extract",
+    )
+    query = MetadataSearchQuery(title="Test")
+    extractor.extract_from_candidate(query, candidate, book_id=42)
+
+    logs = repositories.list_ai_request_logs_by_book(42, db_path=db_path)
+    assert len(logs) == 1
+    log = logs[0]
+    assert log["request_type"] == "metadata_content_extraction"
+    assert log["status"] == "completed"
+    assert log["provider"] == "test"
+
+
+def test_metadata_content_extraction_failure_writes_ai_request_log(tmp_path: Path) -> None:
+    db_path = tmp_path / "lightbook.db"
+    from app.search.content_extractor import MetadataContentExtractor
+    from app.search.types import MetadataSearchCandidate, MetadataSearchQuery
+
+    class _FailingExtractionProvider:
+        name = "test"
+        model = "test-model"
+
+        def extract_from_content(self, system_prompt: str, user_content: str) -> str:
+            return "not valid json at all"
+
+    repo = _Repository(db_path)
+    extractor = MetadataContentExtractor(_FailingExtractionProvider(), repo)
+    candidate = MetadataSearchCandidate(
+        title="Test",
+        raw_content="Some page content",
+        raw_content_type="extract",
+    )
+    query = MetadataSearchQuery(title="Test")
+    extractor.extract_from_candidate(query, candidate, book_id=99)
+
+    logs = repositories.list_ai_request_logs_by_book(99, db_path=db_path)
+    assert len(logs) == 1
+    log = logs[0]
+    assert log["request_type"] == "metadata_content_extraction"
+    assert log["status"] == "failed"
+
+
 class _Repository:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path

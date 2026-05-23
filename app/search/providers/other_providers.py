@@ -5,8 +5,9 @@ from app.search.types import MetadataSearchCandidate, MetadataSearchQuery
 class NdlSearchProvider(BaseMetadataSearchProvider):
     name = "ndl_search"
 
-    def __init__(self, timeout_seconds: int = 10) -> None:
+    def __init__(self, timeout_seconds: int = 10, base_url: str = "") -> None:
         self.timeout_seconds = timeout_seconds
+        self.base_url = base_url
 
     def search(self, query: MetadataSearchQuery) -> list[MetadataSearchCandidate]:
         return []
@@ -25,8 +26,17 @@ class AmazonJpProvider(BaseMetadataSearchProvider):
 class GenericSearchProvider(BaseMetadataSearchProvider):
     name = "generic_search"
 
-    def __init__(self, enabled: bool = False) -> None:
+    def __init__(
+        self,
+        enabled: bool = False,
+        provider_type: str = "disabled",
+        endpoint: str = "",
+        api_key_env: str = "",
+    ) -> None:
         self.enabled = enabled
+        self.provider_type = provider_type
+        self.endpoint = endpoint
+        self.api_key_env = api_key_env
 
     def search(self, query: MetadataSearchQuery) -> list[MetadataSearchCandidate]:
         return []

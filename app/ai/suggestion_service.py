@@ -106,6 +106,7 @@ class AiSuggestionService:
             response = self.provider.suggest_metadata(request)
             raw_response = response.raw_text
             parsed = validate_ai_metadata(response.parsed)
+            parsed = _backfill_from_context(parsed, input_snapshot)
             self._create_request_log(
                 book_id=book_id,
                 provider=response.provider or provider_name,
@@ -300,3 +301,60 @@ def _provider_model(provider: BaseAiProvider) -> str:
         if value:
             return str(value)
     return ""
+
+
+def _backfill_from_context(parsed: dict[str, Any], input_snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Keep known author/summary hints when the provider leaves them empty."""
+    result = dict(parsed)
+    current = input_snapshot.get("current_metadata")
+    if not isinstance(current, dict):
+        current = {}
+    source_info = input_snapshot.get("source_info")
+    if not isinstance(source_info, dict):
+        source_info = {}
+    search_candidates = source_info.get("search_candidates")
+    if not isinstance(search_candidates, list):
+        search_candidates = []
+
+    if not result.get("authors"):
+        current_author = str(current.get("author") or "").strip()
+        if current_author:
+            result["authors"] = [current_author]
+        else:
+            for candidate in search_candidates:
+                if isinstance(candidate, dict) and candidate.get("authors"):
+                    result["authors"] = _string_list(candidate.get("authors"))
+                    if result["authors"]:
+                        break
+
+    summary = str(result.get("summary") or "").strip()
+    if not summary or _is_low_quality_summary(summary):
+        fallback_summary = ""
+        for candidate in search_candidates:
+            if isinstance(candidate, dict):
+                candidate_summary = str(candidate.get("summary") or "").strip()
+                if candidate_summary and not _is_low_quality_summary(candidate_summary):
+                    fallback_summary = candidate_summary
+                    break
+        if fallback_summary:
+            result["summary"] = fallback_summary
+
+    return result
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if value:
+        return [str(value).strip()]
+    return []
+
+
+def _is_low_quality_summary(summary: str) -> bool:
+    text = summary.strip()
+    if not text:
+        return True
+    banned = ("这是第", "本卷为《", "共 ", "共", "元数据建议", "metadata")
+    return any(part in text for part in banned)

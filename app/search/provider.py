@@ -16,3 +16,11 @@ class BaseMetadataSearchProvider(ABC):
     @abstractmethod
     def search(self, query: MetadataSearchQuery) -> list[MetadataSearchCandidate]:
         """Search for metadata candidates without mutating state."""
+
+    def enrich_candidate(
+        self,
+        query: MetadataSearchQuery,
+        candidate: MetadataSearchCandidate,
+    ) -> MetadataSearchCandidate:
+        """Optionally enrich a candidate with API-only detail content."""
+        return candidate

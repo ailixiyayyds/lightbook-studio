@@ -8,7 +8,11 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
-from bs4 import BeautifulSoup
+
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    BeautifulSoup = None  # type: ignore[assignment,misc]
 
 from app.search.provider import BaseMetadataSearchProvider
 from app.search.types import MetadataSearchCandidate, MetadataSearchQuery
@@ -74,6 +78,9 @@ class DuckDuckGoSearchProvider(BaseMetadataSearchProvider):
         self.max_detail_pages = max_detail_pages
 
     def search(self, query: MetadataSearchQuery) -> list[MetadataSearchCandidate]:
+        if BeautifulSoup is None:
+            logger.error("缺少 beautifulsoup4，请安装 web 依赖：pip install beautifulsoup4 lxml")
+            return []
         if not query.title.strip():
             return []
 
@@ -201,6 +208,8 @@ def _build_search_terms(query: MetadataSearchQuery) -> list[str]:
 
 
 def _extract_result_urls(html_text: str) -> list[str]:
+    if BeautifulSoup is None:
+        return []
     urls: list[str] = []
     seen: set[str] = set()
     soup = BeautifulSoup(html_text, "html.parser")

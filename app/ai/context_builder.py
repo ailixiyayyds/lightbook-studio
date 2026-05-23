@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Protocol
+import json
 
 from app.ai.title_cleaner import clean_release_title, infer_book_title
 from app.ai.types import AiMetadataRequest
@@ -14,6 +15,8 @@ class MetadataRepository(Protocol):
     def get_work(self, work_id: int) -> dict[str, Any] | None: ...
 
     def list_novel_chapters(self, book_id: int) -> list[dict[str, Any]]: ...
+
+    def get_latest_metadata_search_result_by_book(self, book_id: int) -> dict[str, Any] | None: ...
 
 
 class MetadataContextBuilderError(LightBookError):
@@ -45,19 +48,18 @@ def build_ai_metadata_request(book_id: int, repository: MetadataRepository) -> A
 
     page_count = int(book.get("page_count") or 0) if media_type == "comic" else None
 
-    search_candidates: list[dict[str, Any]] = []
-    raw_search = book.get("search_candidates")
-    if isinstance(raw_search, list):
-        search_candidates = raw_search
-    elif isinstance(raw_search, str):
-        import json
-
-        try:
-            parsed = json.loads(raw_search)
-            if isinstance(parsed, list):
-                search_candidates = parsed
-        except json.JSONDecodeError:
-            pass
+    search_candidates = _search_candidates_for_ai(book_id, repository)
+    if not search_candidates:
+        raw_search = book.get("search_candidates")
+        if isinstance(raw_search, list):
+            search_candidates = _compact_search_candidates(raw_search)
+        elif isinstance(raw_search, str):
+            try:
+                parsed = json.loads(raw_search)
+                if isinstance(parsed, list):
+                    search_candidates = _compact_search_candidates(parsed)
+            except json.JSONDecodeError:
+                pass
 
     return AiMetadataRequest(
         book_id=book_id,
@@ -133,6 +135,79 @@ def _novel_text_sample(chapters: list[dict[str, Any]]) -> str:
         parts.append(content[:remaining])
         total_length += len(parts[-1])
     return "".join(parts)
+
+
+def _search_candidates_for_ai(book_id: int, repository: MetadataRepository) -> list[dict[str, Any]]:
+    getter = getattr(repository, "get_latest_metadata_search_result_by_book", None)
+    if getter is None:
+        return []
+    try:
+        result = getter(book_id)
+    except Exception:
+        return []
+    if not result:
+        return []
+    raw_candidates = result.get("candidates_json")
+    if isinstance(raw_candidates, str):
+        try:
+            raw_candidates = json.loads(raw_candidates)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(raw_candidates, list):
+        return []
+    return _compact_search_candidates(raw_candidates)
+
+
+def _compact_search_candidates(candidates: list[Any]) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        extraction = candidate.get("extraction_json")
+        if not isinstance(extraction, dict):
+            extraction = {}
+        match = extraction.get("match_assessment")
+        if isinstance(match, dict) and match.get("is_likely_same_work") is False:
+            continue
+        if candidate.get("extraction_status") and candidate.get("extraction_status") != "extracted":
+            continue
+        summary = str(
+            candidate.get("summary")
+            or extraction.get("summary_zh")
+            or extraction.get("summary")
+            or ""
+        ).strip()
+        compact.append(
+            {
+                "title": str(candidate.get("title") or extraction.get("title") or "").strip(),
+                "original_title": str(
+                    candidate.get("original_title") or extraction.get("original_title") or ""
+                ).strip(),
+                "authors": _list_value(candidate.get("authors") or extraction.get("authors")),
+                "publisher": str(candidate.get("publisher") or extraction.get("publisher") or "").strip(),
+                "publication_date": str(
+                    candidate.get("publication_date") or extraction.get("publication_date") or ""
+                ).strip(),
+                "summary": summary,
+                "genres": _list_value(candidate.get("genres") or extraction.get("genres")),
+                "tags": _list_value(candidate.get("tags") or extraction.get("tags")),
+                "source_name": str(candidate.get("source_name") or "").strip(),
+                "source_url": str(candidate.get("source_url") or "").strip(),
+            }
+        )
+        if len(compact) >= 3:
+            break
+    return compact
+
+
+def _list_value(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if value:
+        return [str(value).strip()]
+    return []
 
 
 def _optional_int(value: Any) -> int | None:

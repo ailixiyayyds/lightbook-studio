@@ -1,11 +1,13 @@
-**pycache**/
 __pycache__/
 *.py[cod]
 .pytest_cache/
-.pytest_tmp/
 .pytest_*/
-data/
-logs/
+.test_*/
+.tmp_tests/
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
 *.db
 config.json
 .env

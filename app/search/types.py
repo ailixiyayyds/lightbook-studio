@@ -34,6 +34,16 @@ class MetadataSearchCandidate:
     confidence: float = 0.0
     verified: bool = False
     notes: list[str] = field(default_factory=list)
+    # Raw content for AI extraction
+    raw_content: str = ""
+    raw_content_type: str = ""  # extract, html, wikitext, api_json
+    # API response metadata
+    categories: list[str] = field(default_factory=list)
+    images: list[str] = field(default_factory=list)
+    # AI extraction results
+    extraction_json: dict = field(default_factory=dict)
+    extraction_status: str = ""  # not_extracted, extracted, failed
+    extraction_error: str = ""
 
 
 _SOURCE_TYPE_LABELS: dict[str, str] = {

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from app.search.candidate_ranker import score_and_sort
-from app.search.search_pipeline import _deduplicate
+from app.search.config import SearchConfig
+from app.search.search_pipeline import _deduplicate, _run_content_extraction
+from app.search.search_pipeline import search_metadata_candidates
 from app.search.types import MetadataSearchCandidate, MetadataSearchQuery
 
 
@@ -109,3 +111,55 @@ class TestCandidateSortingDoesNotInventUrls:
         result = score_and_sort(MetadataSearchQuery(title="Test"), candidates)
         result_urls = {c.source_url for c in result}
         assert result_urls == original_urls
+
+
+class TestSearchConfigSwitch:
+
+    def test_disabled_search_config_skips_all_providers(self) -> None:
+        result = search_metadata_candidates(
+            MetadataSearchQuery(title="Test"),
+            search_config=SearchConfig(enabled=False),
+        )
+
+        assert result.candidates == []
+        assert result.diagnostics[0].enabled is False
+        assert "禁用" in (result.diagnostics[0].error or "")
+
+
+class _CountingExtractor:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def extract_from_candidate(self, query, candidate, *, book_id=None):
+        self.calls += 1
+        return _candidate(
+            candidate.title,
+            candidate.source_url,
+            raw_content=candidate.raw_content,
+            extraction_status="extracted",
+        )
+
+
+class TestContentExtractionLimit:
+
+    def test_run_content_extraction_respects_limit(self) -> None:
+        extractor = _CountingExtractor()
+        candidates = [
+            _candidate("A", raw_content="content", extraction_status="not_extracted"),
+            _candidate("B", raw_content="content", extraction_status="not_extracted"),
+            _candidate("C", raw_content="content", extraction_status="not_extracted"),
+        ]
+
+        result = _run_content_extraction(
+            MetadataSearchQuery(title="Test"),
+            candidates,
+            extractor,
+            max_extractions=2,
+        )
+
+        assert extractor.calls == 2
+        assert [candidate.extraction_status for candidate in result] == [
+            "extracted",
+            "extracted",
+            "not_extracted",
+        ]

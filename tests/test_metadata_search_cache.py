@@ -70,6 +70,50 @@ def test_apply_candidate_does_not_clear_search_cache(tmp_path: Path) -> None:
     assert json.loads(str(latest["candidates_json"]))[0]["title"] == "New"
 
 
+def test_candidates_json_preserves_extraction_fields(tmp_path: Path) -> None:
+    db_path = tmp_path / "lightbook.db"
+    book = _book(db_path, "Title")
+    candidates = [
+        {
+            "title": "Test",
+            "source_name": "萌娘百科",
+            "source_url": "https://zh.moegirl.org.cn/Test",
+            "raw_content": "Some raw content here",
+            "raw_content_type": "extract",
+            "categories": ["漫画作品", "百合"],
+            "images": ["https://example.com/cover.jpg"],
+            "extraction_json": {
+                "summary": "A test summary",
+                "genres": ["漫画", "百合"],
+                "tags": ["校园"],
+                "match_assessment": {"is_likely_same_work": True, "reason": "title match"},
+            },
+            "extraction_status": "extracted",
+            "extraction_error": "",
+        }
+    ]
+    repositories.create_metadata_search_result(
+        book_id=int(book["id"]),
+        provider="moegirl",
+        candidates_json=candidates,
+        status="completed",
+        db_path=db_path,
+    )
+
+    latest = repositories.get_latest_metadata_search_result_by_book(int(book["id"]), db_path=db_path)
+    assert latest is not None
+    saved = json.loads(str(latest["candidates_json"]))
+    assert len(saved) == 1
+    c = saved[0]
+    assert c["raw_content"] == "Some raw content here"
+    assert c["raw_content_type"] == "extract"
+    assert c["categories"] == ["漫画作品", "百合"]
+    assert c["images"] == ["https://example.com/cover.jpg"]
+    assert c["extraction_status"] == "extracted"
+    assert c["extraction_json"]["summary"] == "A test summary"
+    assert c["extraction_json"]["match_assessment"]["is_likely_same_work"] is True
+
+
 def _book(db_path: Path, title: str) -> dict:
     work = repositories.create_work(title=title, db_path=db_path)
     return repositories.create_book(

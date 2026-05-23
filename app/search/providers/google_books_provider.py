@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 import os
+import json
 import time
 from typing import Any
 
 import httpx
 
+from app.core.local_secrets import get_secret
 from app.search.provider import BaseMetadataSearchProvider
 from app.search.types import MetadataSearchCandidate, MetadataSearchQuery, is_valid_search_title
 
@@ -22,9 +24,9 @@ _cache: dict[str, tuple[float, list[MetadataSearchCandidate]]] = {}
 class GoogleBooksProvider(BaseMetadataSearchProvider):
     name = "google_books"
 
-    def __init__(self, timeout_seconds: int = 10) -> None:
+    def __init__(self, timeout_seconds: int = 10, api_key_env: str = "GOOGLE_BOOKS_API_KEY") -> None:
         self.timeout_seconds = timeout_seconds
-        self._api_key = os.environ.get("GOOGLE_BOOKS_API_KEY", "")
+        self._api_key = os.environ.get(api_key_env, "") or get_secret("google_books_api_key")
         self._request_count = 0
         self._error: str | None = None
 
@@ -139,10 +141,29 @@ def _parse_items(items: list[dict[str, Any]]) -> list[MetadataSearchCandidate]:
                 isbns.append(f"{ident.get('type', '')}:{ident.get('identifier', '')}")
 
         images = vi.get("imageLinks") or {}
+        image_urls: list[str] = []
         cover_url = ""
         if isinstance(images, dict):
             raw = str(images.get("thumbnail") or images.get("smallThumbnail") or "")
             cover_url = raw.replace("http://", "https://", 1) if raw.startswith("http://") else raw
+            for value in images.values():
+                image = str(value or "")
+                if image.startswith("http://"):
+                    image = image.replace("http://", "https://", 1)
+                if image and image not in image_urls:
+                    image_urls.append(image)
+
+        raw_content_data = {
+            "volumeInfo": {
+                "title": vi.get("title"),
+                "subtitle": vi.get("subtitle"),
+                "authors": vi.get("authors"),
+                "publisher": vi.get("publisher"),
+                "publishedDate": vi.get("publishedDate"),
+                "description": vi.get("description"),
+                "categories": vi.get("categories"),
+            }
+        }
 
         result.append(MetadataSearchCandidate(
             title=title,
@@ -159,6 +180,11 @@ def _parse_items(items: list[dict[str, Any]]) -> list[MetadataSearchCandidate]:
             genres=[str(c).strip() for c in (vi.get("categories") or []) if str(c).strip()],
             tags=[],
             verified=True,
+            raw_content=json.dumps(raw_content_data, ensure_ascii=False)[:20000],
+            raw_content_type="api_json",
+            categories=[str(c).strip() for c in (vi.get("categories") or []) if str(c).strip()],
+            images=image_urls,
+            extraction_status="not_extracted",
         ))
 
     return result

@@ -4,7 +4,10 @@ from html import escape
 from pathlib import Path
 from uuid import uuid4
 
-from ebooklib import epub
+try:
+    from ebooklib import epub
+except ImportError:
+    epub = None  # type: ignore[assignment]
 
 from app.core.models import ExporterError
 from app.parsers.novel_chapter_parser import NovelChapter
@@ -28,6 +31,8 @@ def export_novel_epub(
     output_path: Path,
     cover_path: str | Path | None = None,
 ) -> Path:
+    if epub is None:
+        raise EpubExportError("缺少 ebooklib，请安装 epub 依赖：pip install ebooklib")
     if not chapters:
         raise EpubExportError("无法导出 EPUB：chapters 不能为空。")
 

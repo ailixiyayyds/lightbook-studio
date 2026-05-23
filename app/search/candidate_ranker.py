@@ -51,6 +51,10 @@ def _base_score(candidate: MetadataSearchCandidate, query_title: str) -> int:
     if candidate.publisher:
         score -= 1
 
+    match_assessment = candidate.extraction_json.get("match_assessment") if candidate.extraction_json else None
+    if isinstance(match_assessment, dict) and match_assessment.get("is_likely_same_work") is False:
+        score += 100
+
     c_title = candidate.title.lower()
     if query_title and query_title in c_title:
         score -= 10

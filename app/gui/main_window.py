@@ -5,7 +5,7 @@ import logging
 import os
 import sys
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -49,9 +49,10 @@ from PySide6.QtWidgets import (
 
 from app.core.cache_cleanup import cleanup_old_log_files, cleanup_unreferenced_cover_cache
 from app.core.config import load_config, save_config
+from app.core.local_secrets import get_secret, has_secret, set_secret
 from app.core.logging_config import LOG_DIR, LOG_FILE
 from app.core.models import ComicMetadata, ImportResult, LightBookError, MangaDirection
-from app.ai.config import AiProviderConfig, load_ai_provider_config, save_ai_provider_config
+from app.ai.config import AiProviderConfig, get_api_key_from_env, load_ai_provider_config, save_ai_provider_config
 from app.ai.openai_compatible_provider import AiProviderConfigError, OpenAICompatibleProvider
 from app.ai.provider_factory import create_ai_provider
 from app.ai.suggestion_service import AiSuggestionService
@@ -65,6 +66,7 @@ from app.parsers.novel_chapter_parser import NovelChapter
 from app.services.batch_export_service import export_book_from_database, export_novel_preview_from_database
 from app.gui.metadata_search_dialog import MetadataSearchDialog
 from app.gui.cache_binding import should_refresh_book_cache
+from app.gui.widgets import set_comfortable_button_size
 from app.search.config import SearchConfig, load_search_config, save_search_config
 from app.search.provider_factory import create_metadata_search_provider
 from app.search.types import MetadataSearchCandidate, MetadataSearchQuery
@@ -239,8 +241,13 @@ class MainWindow(QMainWindow):
         self.batch_table.verticalHeader().setDefaultSectionSize(30)
         self.batch_table.setMinimumWidth(620)
         self.batch_table.setAlternatingRowColors(True)
-        self.batch_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.batch_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self.batch_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.batch_table.setColumnWidth(0, 70)
+        self.batch_table.setColumnWidth(1, 90)
+        self.batch_table.setColumnWidth(3, 60)
+        self.batch_table.setColumnWidth(4, 90)
+        self.batch_table.setColumnWidth(5, 180)
+        self.batch_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.batch_table.itemSelectionChanged.connect(self._on_batch_selection_changed)
         self.batch_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.batch_table.customContextMenuRequested.connect(self._show_batch_context_menu)
@@ -380,6 +387,64 @@ class MainWindow(QMainWindow):
         self.search_max_candidates_spin.setRange(1, 20)
         self.search_max_detail_pages_spin = QSpinBox()
         self.search_max_detail_pages_spin.setRange(0, 8)
+        self.search_ai_query_planner_check = QCheckBox("启用 AI Query Planner")
+        self.search_ai_content_extraction_check = QCheckBox("启用 AI 内容抽取")
+        self.search_content_extract_max_chars_spin = QSpinBox()
+        self.search_content_extract_max_chars_spin.setRange(1000, 40000)
+        self.search_content_extract_max_chars_spin.setSingleStep(1000)
+        self.search_content_extract_top_n_spin = QSpinBox()
+        self.search_content_extract_top_n_spin.setRange(1, 10)
+        self.search_bangumi_enabled_check = QCheckBox("启用 Bangumi")
+        self.search_bangumi_base_url_edit = QLineEdit()
+        self.search_bangumi_user_agent_edit = QLineEdit()
+        self.search_bangumi_timeout_spin = QSpinBox()
+        self.search_bangumi_timeout_spin.setRange(1, 60)
+        self.search_bangumi_max_queries_spin = QSpinBox()
+        self.search_bangumi_max_queries_spin.setRange(1, 12)
+        self.search_moegirl_enabled_check = QCheckBox("启用萌娘百科")
+        self.search_moegirl_api_url_edit = QLineEdit()
+        self.search_moegirl_user_agent_edit = QLineEdit()
+        self.search_moegirl_parse_check = QCheckBox("启用 parse API")
+        self.search_moegirl_wikitext_check = QCheckBox("启用 wikitext fallback")
+        self.search_moegirl_html_check = QCheckBox("允许同站 HTML fallback（默认关闭）")
+        self.search_moegirl_max_detail_spin = QSpinBox()
+        self.search_moegirl_max_detail_spin.setRange(1, 20)
+        self.search_moegirl_timeout_spin = QSpinBox()
+        self.search_moegirl_timeout_spin.setRange(1, 60)
+        self.search_google_enabled_check = QCheckBox("启用 Google Books")
+        self.search_google_key_env_edit = QLineEdit()
+        self.search_google_key_edit = QLineEdit()
+        self.search_google_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.search_google_key_status_label = QLabel("")
+        self.search_google_timeout_spin = QSpinBox()
+        self.search_google_timeout_spin.setRange(1, 60)
+        self.search_google_cooldown_spin = QSpinBox()
+        self.search_google_cooldown_spin.setRange(1, 120)
+        self.search_ndl_enabled_check = QCheckBox("启用 NDL")
+        self.search_ndl_base_url_edit = QLineEdit()
+        self.search_ndl_timeout_spin = QSpinBox()
+        self.search_ndl_timeout_spin.setRange(1, 60)
+        self.search_open_library_enabled_check = QCheckBox("启用 Open Library")
+        self.search_open_library_base_url_edit = QLineEdit()
+        self.search_open_library_timeout_spin = QSpinBox()
+        self.search_open_library_timeout_spin.setRange(1, 60)
+        self.search_generic_provider_combo = QComboBox()
+        for label, value in [
+            ("disabled", "disabled"),
+            ("brave", "brave"),
+            ("bing", "bing"),
+            ("serpapi", "serpapi"),
+            ("tavily", "tavily"),
+        ]:
+            self.search_generic_provider_combo.addItem(label, value)
+        self.search_generic_endpoint_edit = QLineEdit()
+        self.search_generic_key_env_edit = QLineEdit()
+        self.search_generic_key_edit = QLineEdit()
+        self.search_generic_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.search_generic_key_status_label = QLabel("")
+        self.search_amazon_jp_enabled_check = QCheckBox("启用 Amazon JP 官方 API（不会爬 HTML）")
+        self.search_test_button = QPushButton("测试搜索配置")
+        self.search_test_button.clicked.connect(self._test_search_settings)
         self._load_search_settings_into_widgets()
 
         self.settings_output_label = QLabel("未选择")
@@ -513,17 +578,7 @@ class MainWindow(QMainWindow):
         sys.excepthook = hook
 
     def _build_menu_bar(self) -> None:
-        menu_bar = self.menuBar()
-
-        help_menu = menu_bar.addMenu("帮助")
-
-        open_log_action = QAction("打开日志文件", self)
-        open_log_action.triggered.connect(self._open_log_file)
-        help_menu.addAction(open_log_action)
-
-        open_log_dir_action = QAction("打开日志目录", self)
-        open_log_dir_action.triggered.connect(self._open_log_dir)
-        help_menu.addAction(open_log_dir_action)
+        self.menuBar().hide()
 
     def _open_log_file(self) -> None:
         if LOG_FILE.exists():
@@ -647,6 +702,27 @@ class MainWindow(QMainWindow):
         mark_ready_button.clicked.connect(lambda: self._mark_selected_batch_books("ready"))
         mark_need_review_button = QPushButton("标记待确认")
         mark_need_review_button.clicked.connect(lambda: self._mark_selected_batch_books("need_review"))
+        batch_ai_menu_button = QPushButton("AI 批量操作")
+        batch_ai_menu = QMenu(batch_ai_menu_button)
+        batch_ai_menu.addAction("生成 AI 建议", lambda: self._batch_generate_ai_suggestions(apply=False))
+        batch_ai_menu.addAction("生成并应用 AI 建议", lambda: self._batch_generate_ai_suggestions(apply=True))
+        batch_ai_menu.addSeparator()
+        batch_ai_menu.addAction("搜索封面/资料", lambda: self._batch_search_metadata(apply=False))
+        batch_ai_menu.addAction("搜索并应用资料", lambda: self._batch_search_metadata(apply=True))
+        batch_ai_menu_button.setMenu(batch_ai_menu)
+        for button in (
+            import_files_button,
+            import_folders_button,
+            scan_sources_button,
+            refresh_button,
+            select_all_button,
+            clear_selection_button,
+            delete_selected_button,
+            mark_ready_button,
+            mark_need_review_button,
+            batch_ai_menu_button,
+        ):
+            set_comfortable_button_size(button)
 
         import_buttons = QHBoxLayout()
         import_buttons.setContentsMargins(0, 0, 0, 0)
@@ -665,6 +741,7 @@ class MainWindow(QMainWindow):
         list_action_buttons.addWidget(select_all_button)
         list_action_buttons.addWidget(clear_selection_button)
         list_action_buttons.addWidget(delete_selected_button)
+        list_action_buttons.addWidget(batch_ai_menu_button)
         list_action_buttons.addStretch()
 
         self.detail_tabs = QTabWidget()
@@ -1070,9 +1147,48 @@ class MainWindow(QMainWindow):
         search_form.addRow("搜索超时秒数", self.search_timeout_spin)
         search_form.addRow("最多搜索结果", self.search_max_candidates_spin)
         search_form.addRow("最多详情页面", self.search_max_detail_pages_spin)
+        search_form.addRow("AI Query Planner", self.search_ai_query_planner_check)
+        search_form.addRow("AI 内容抽取", self.search_ai_content_extraction_check)
+        search_form.addRow("抽取最大字数", self.search_content_extract_max_chars_spin)
+        search_form.addRow("抽取前 N 个候选", self.search_content_extract_top_n_spin)
+        search_form.addRow("Bangumi", self.search_bangumi_enabled_check)
+        search_form.addRow("Bangumi Base URL", self.search_bangumi_base_url_edit)
+        search_form.addRow("Bangumi User-Agent", self.search_bangumi_user_agent_edit)
+        search_form.addRow("Bangumi 超时", self.search_bangumi_timeout_spin)
+        search_form.addRow("Bangumi 最大 query", self.search_bangumi_max_queries_spin)
+        search_form.addRow("萌娘百科", self.search_moegirl_enabled_check)
+        search_form.addRow("萌娘 API URL", self.search_moegirl_api_url_edit)
+        search_form.addRow("萌娘 User-Agent", self.search_moegirl_user_agent_edit)
+        search_form.addRow("萌娘 parse API", self.search_moegirl_parse_check)
+        search_form.addRow("萌娘 wikitext fallback", self.search_moegirl_wikitext_check)
+        search_form.addRow("萌娘 HTML fallback", self.search_moegirl_html_check)
+        search_form.addRow("萌娘最大详情页", self.search_moegirl_max_detail_spin)
+        search_form.addRow("萌娘超时", self.search_moegirl_timeout_spin)
+        search_form.addRow("Google Books", self.search_google_enabled_check)
+        search_form.addRow("Google API Key 环境变量", self.search_google_key_env_edit)
+        search_form.addRow("Google API Key（本地保存）", self.search_google_key_edit)
+        search_form.addRow("Google Key 状态", self.search_google_key_status_label)
+        search_form.addRow("Google 超时", self.search_google_timeout_spin)
+        search_form.addRow("Google 429 cooldown 分钟", self.search_google_cooldown_spin)
+        search_form.addRow("NDL Search", self.search_ndl_enabled_check)
+        search_form.addRow("NDL Base URL", self.search_ndl_base_url_edit)
+        search_form.addRow("NDL 超时", self.search_ndl_timeout_spin)
+        search_form.addRow("Open Library", self.search_open_library_enabled_check)
+        search_form.addRow("Open Library Base URL", self.search_open_library_base_url_edit)
+        search_form.addRow("Open Library 超时", self.search_open_library_timeout_spin)
+        search_form.addRow("通用搜索 API", self.search_generic_provider_combo)
+        search_form.addRow("通用搜索 endpoint", self.search_generic_endpoint_edit)
+        search_form.addRow("通用搜索 Key 环境变量", self.search_generic_key_env_edit)
+        search_form.addRow("通用搜索 API Key（本地保存）", self.search_generic_key_edit)
+        search_form.addRow("通用搜索 Key 状态", self.search_generic_key_status_label)
+        search_form.addRow("Amazon JP", self.search_amazon_jp_enabled_check)
         search_save_btn = QPushButton("保存搜索设置")
         search_save_btn.clicked.connect(self._save_search_settings)
-        search_form.addRow("", search_save_btn)
+        search_btns = QHBoxLayout()
+        search_btns.addWidget(search_save_btn)
+        search_btns.addWidget(self.search_test_button)
+        search_btns.addStretch()
+        search_form.addRow("", search_btns)
         search_group.setLayout(search_form)
 
         cache_group = QGroupBox("缓存与日志")
@@ -1249,6 +1365,39 @@ class MainWindow(QMainWindow):
         self.search_timeout_spin.setValue(config.timeout_seconds)
         self.search_max_candidates_spin.setValue(config.max_candidates)
         self.search_max_detail_pages_spin.setValue(config.max_detail_pages)
+        self.search_ai_query_planner_check.setChecked(config.ai_query_planner_enabled)
+        self.search_ai_content_extraction_check.setChecked(config.ai_content_extraction_enabled)
+        self.search_content_extract_max_chars_spin.setValue(config.content_extract_max_chars)
+        self.search_content_extract_top_n_spin.setValue(config.content_extract_top_n)
+        self.search_bangumi_enabled_check.setChecked(config.bangumi_enabled)
+        self.search_bangumi_base_url_edit.setText(config.bangumi_base_url)
+        self.search_bangumi_user_agent_edit.setText(config.bangumi_user_agent)
+        self.search_bangumi_timeout_spin.setValue(config.bangumi_timeout_seconds)
+        self.search_bangumi_max_queries_spin.setValue(config.bangumi_max_queries)
+        self.search_moegirl_enabled_check.setChecked(config.moegirl_enabled)
+        self.search_moegirl_api_url_edit.setText(config.moegirl_api_url)
+        self.search_moegirl_user_agent_edit.setText(config.moegirl_user_agent)
+        self.search_moegirl_parse_check.setChecked(config.moegirl_parse_api_enabled)
+        self.search_moegirl_wikitext_check.setChecked(config.moegirl_wikitext_fallback_enabled)
+        self.search_moegirl_html_check.setChecked(config.moegirl_html_fallback_enabled)
+        self.search_moegirl_max_detail_spin.setValue(config.moegirl_max_detail_pages)
+        self.search_moegirl_timeout_spin.setValue(config.moegirl_timeout_seconds)
+        self.search_google_enabled_check.setChecked(config.google_books_enabled)
+        self.search_google_key_env_edit.setText(config.google_books_api_key_env)
+        self.search_google_timeout_spin.setValue(config.google_books_timeout_seconds)
+        self.search_google_cooldown_spin.setValue(config.google_books_cooldown_minutes)
+        self.search_ndl_enabled_check.setChecked(config.ndl_enabled)
+        self.search_ndl_base_url_edit.setText(config.ndl_base_url)
+        self.search_ndl_timeout_spin.setValue(config.ndl_timeout_seconds)
+        self.search_open_library_enabled_check.setChecked(config.open_library_enabled)
+        self.search_open_library_base_url_edit.setText(config.open_library_base_url)
+        self.search_open_library_timeout_spin.setValue(config.open_library_timeout_seconds)
+        generic_index = self.search_generic_provider_combo.findData(config.generic_search_provider)
+        self.search_generic_provider_combo.setCurrentIndex(generic_index if generic_index >= 0 else 0)
+        self.search_generic_endpoint_edit.setText(config.generic_search_endpoint)
+        self.search_generic_key_env_edit.setText(config.generic_search_api_key_env)
+        self.search_amazon_jp_enabled_check.setChecked(config.amazon_jp_enabled)
+        self._refresh_search_key_status(config)
 
     def _search_config_from_settings_form(self) -> SearchConfig:
         return SearchConfig(
@@ -1257,17 +1406,83 @@ class MainWindow(QMainWindow):
             timeout_seconds=int(self.search_timeout_spin.value()),
             max_candidates=int(self.search_max_candidates_spin.value()),
             max_detail_pages=int(self.search_max_detail_pages_spin.value()),
+            ai_query_planner_enabled=self.search_ai_query_planner_check.isChecked(),
+            ai_content_extraction_enabled=self.search_ai_content_extraction_check.isChecked(),
+            content_extract_max_chars=int(self.search_content_extract_max_chars_spin.value()),
+            content_extract_top_n=int(self.search_content_extract_top_n_spin.value()),
+            bangumi_enabled=self.search_bangumi_enabled_check.isChecked(),
+            bangumi_base_url=self.search_bangumi_base_url_edit.text().strip() or "https://api.bgm.tv",
+            bangumi_user_agent=self.search_bangumi_user_agent_edit.text().strip() or "LightBookStudio/0.4",
+            bangumi_timeout_seconds=int(self.search_bangumi_timeout_spin.value()),
+            bangumi_max_queries=int(self.search_bangumi_max_queries_spin.value()),
+            moegirl_enabled=self.search_moegirl_enabled_check.isChecked(),
+            moegirl_api_url=self.search_moegirl_api_url_edit.text().strip() or "https://zh.moegirl.org.cn/api.php",
+            moegirl_user_agent=self.search_moegirl_user_agent_edit.text().strip() or "LightBookStudio/0.4",
+            moegirl_parse_api_enabled=self.search_moegirl_parse_check.isChecked(),
+            moegirl_wikitext_fallback_enabled=self.search_moegirl_wikitext_check.isChecked(),
+            moegirl_html_fallback_enabled=self.search_moegirl_html_check.isChecked(),
+            moegirl_max_detail_pages=int(self.search_moegirl_max_detail_spin.value()),
+            moegirl_timeout_seconds=int(self.search_moegirl_timeout_spin.value()),
+            google_books_enabled=self.search_google_enabled_check.isChecked(),
+            google_books_api_key_env=self.search_google_key_env_edit.text().strip() or "GOOGLE_BOOKS_API_KEY",
+            google_books_timeout_seconds=int(self.search_google_timeout_spin.value()),
+            google_books_cooldown_minutes=int(self.search_google_cooldown_spin.value()),
+            ndl_enabled=self.search_ndl_enabled_check.isChecked(),
+            ndl_base_url=self.search_ndl_base_url_edit.text().strip(),
+            ndl_timeout_seconds=int(self.search_ndl_timeout_spin.value()),
+            open_library_enabled=self.search_open_library_enabled_check.isChecked(),
+            open_library_base_url=self.search_open_library_base_url_edit.text().strip() or "https://openlibrary.org",
+            open_library_timeout_seconds=int(self.search_open_library_timeout_spin.value()),
+            generic_search_provider=str(self.search_generic_provider_combo.currentData() or "disabled"),
+            generic_search_endpoint=self.search_generic_endpoint_edit.text().strip(),
+            generic_search_api_key_env=self.search_generic_key_env_edit.text().strip() or "LIGHTBOOK_SEARCH_API_KEY",
+            amazon_jp_enabled=self.search_amazon_jp_enabled_check.isChecked(),
         )
 
     def _save_search_settings(self) -> None:
         config = self._search_config_from_settings_form()
         try:
+            if self.search_google_key_edit.text().strip():
+                set_secret("google_books_api_key", self.search_google_key_edit.text().strip())
+                self.search_google_key_edit.clear()
+            if self.search_generic_key_edit.text().strip():
+                set_secret("generic_search_api_key", self.search_generic_key_edit.text().strip())
+                self.search_generic_key_edit.clear()
             save_search_config(_GuiAiRepository(), config)
         except Exception as exc:
             logger.exception("Failed to save search settings")
             self._show_error(f"保存搜索设置失败：{exc}")
             return
+        self._refresh_search_key_status(config)
         QMessageBox.information(self, "搜索设置", "搜索设置已保存。")
+
+    def _refresh_search_key_status(self, config: SearchConfig) -> None:
+        google_loaded = bool(os.environ.get(config.google_books_api_key_env) or has_secret("google_books_api_key"))
+        generic_loaded = bool(os.environ.get(config.generic_search_api_key_env) or has_secret("generic_search_api_key"))
+        self.search_google_key_status_label.setText(f"已配置：{google_loaded}")
+        self.search_generic_key_status_label.setText(f"已配置：{generic_loaded}")
+
+    def _test_search_settings(self) -> None:
+        config = self._search_config_from_settings_form()
+        self._refresh_search_key_status(config)
+        enabled = []
+        if config.bangumi_enabled:
+            enabled.append("Bangumi")
+        if config.moegirl_enabled:
+            enabled.append("萌娘百科")
+        if config.google_books_enabled:
+            enabled.append("Google Books")
+        if config.ndl_enabled:
+            enabled.append("NDL")
+        if config.open_library_enabled:
+            enabled.append("Open Library")
+        QMessageBox.information(
+            self,
+            "搜索配置",
+            "配置可用。启用来源："
+            + (", ".join(enabled) if enabled else "无")
+            + "\nAPI Key 不会写入 app_settings；本地输入保存到 data/local_secrets.json。",
+        )
 
     def _save_splitter_sizes(self, *args: object) -> None:
         try:
@@ -1869,6 +2084,8 @@ class MainWindow(QMainWindow):
             for column_index, value in enumerate(row_values):
                 item = QTableWidgetItem(value)
                 item.setData(Qt.ItemDataRole.UserRole, int(book["id"]))
+                if column_index in (2, 5):
+                    item.setToolTip(value)
                 self.batch_table.setItem(row_index, column_index, item)
             if current_book_id is not None and int(book["id"]) == current_book_id:
                 selected_row = row_index
@@ -1933,6 +2150,11 @@ class MainWindow(QMainWindow):
         delete_action = menu.addAction("删除")
         open_folder_action = menu.addAction("打开来源文件夹")
         menu.addSeparator()
+        ai_action = menu.addAction("为选中项生成 AI 建议")
+        ai_apply_action = menu.addAction("生成并应用 AI 建议")
+        search_action = menu.addAction("为选中项搜索封面/资料")
+        search_apply_action = menu.addAction("搜索并应用资料")
+        menu.addSeparator()
         reparse_action = menu.addAction("重新解析")
         selected_action = menu.exec(self.batch_table.viewport().mapToGlobal(position))  # type: ignore[arg-type]
 
@@ -1944,6 +2166,14 @@ class MainWindow(QMainWindow):
             self._delete_selected_batch_books()
         elif selected_action == open_folder_action:
             self._open_selected_source_folder()
+        elif selected_action == ai_action:
+            self._batch_generate_ai_suggestions(apply=False)
+        elif selected_action == ai_apply_action:
+            self._batch_generate_ai_suggestions(apply=True)
+        elif selected_action == search_action:
+            self._batch_search_metadata(apply=False)
+        elif selected_action == search_apply_action:
+            self._batch_search_metadata(apply=True)
         elif selected_action == reparse_action:
             self._reparse_selected_batch_book()
 
@@ -1963,6 +2193,155 @@ class MainWindow(QMainWindow):
         keep_selected = book_ids[-1] if book_ids else None
         self._refresh_batch_table(selected_book_id=keep_selected)
         QMessageBox.information(self, "批量整理", f"已将 {updated_count} 个条目标记为 {status}。")
+
+    def _batch_generate_ai_suggestions(self, *, apply: bool) -> None:
+        book_ids = self._selected_batch_book_ids()
+        if not book_ids:
+            self._show_error("请先选择一个或多个 book。")
+            return
+
+        import app.gui.workers as w
+
+        def work() -> object:
+            config = load_ai_provider_config(_GuiAiRepository())
+            provider = create_ai_provider(config)
+            service = AiSuggestionService(_GuiAiRepository(), provider)
+            summary = {"total": len(book_ids), "success": 0, "failed": 0, "applied": 0, "errors": []}
+            for index, book_id in enumerate(book_ids, start=1):
+                logger.info("Batch AI suggestion %s/%s book_id=%s apply=%s", index, len(book_ids), book_id, apply)
+                try:
+                    service.generate_for_book(book_id)
+                    summary["success"] += 1
+                    if apply:
+                        latest = list_latest_ai_suggestion_by_book(book_id)
+                        if latest:
+                            applied = _apply_safe_ai_suggestion(book_id, latest, _GuiAiRepository())
+                            summary["applied"] += applied
+                except Exception as exc:
+                    summary["failed"] += 1
+                    summary["errors"].append(f"book {book_id}: {exc}")
+                    logger.warning("Batch AI suggestion failed book_id=%s: %s", book_id, exc)
+            return summary
+
+        def on_result(_tid: str, _tname: str, _bid: object, result: object) -> None:
+            if isinstance(result, dict):
+                self._refresh_batch_table(selected_book_id=self.current_book_id)
+                if self.current_book_id is not None:
+                    self._load_ai_suggestion_cache_for_book(self.current_book_id)
+                errors = result.get("errors") or []
+                message = (
+                    f"处理完成：成功 {result.get('success', 0)}，失败 {result.get('failed', 0)}，"
+                    f"应用字段 {result.get('applied', 0)}。"
+                )
+                if errors:
+                    message += "\n\n失败详情：\n" + "\n".join(str(e) for e in errors[:10])
+                QMessageBox.information(self, "批量 AI 建议", message)
+
+        handle = w.submit_background_task(
+            task_name="batch_ai_suggestion",
+            book_id=None,
+            fn=work,
+            on_result=on_result,
+            on_error=lambda _tid, _tname, _bid, err: self._show_error(f"批量 AI 建议失败：{err[:400]}"),
+            on_finished=lambda _tid, _tname, _bid: self._active_handles.pop(_tid, None),
+        )
+        self._active_handles[handle.task_id] = handle
+
+    def _batch_search_metadata(self, *, apply: bool) -> None:
+        book_ids = self._selected_batch_book_ids()
+        if not book_ids:
+            self._show_error("请先选择一个或多个 book。")
+            return
+        search_config = load_search_config(_GuiAiRepository())
+        if not search_config.enabled:
+            self._show_error("联网搜索未启用，请在设置中开启。")
+            return
+        apply_cover = False
+        if apply:
+            apply_cover = (
+                QMessageBox.question(
+                    self,
+                    "批量应用资料",
+                    "是否同时下载并应用候选封面？\n选择“否”时只应用简介、分类、标签和空作者。",
+                )
+                == QMessageBox.StandardButton.Yes
+            )
+
+        import app.gui.workers as w
+
+        def work() -> object:
+            from app.search.search_pipeline import search_metadata_candidates
+            summary = {"total": len(book_ids), "success": 0, "failed": 0, "applied": 0, "errors": []}
+            content_extractor = self._build_content_extractor() if search_config.ai_content_extraction_enabled else None
+            for index, book_id in enumerate(book_ids, start=1):
+                logger.info("Batch metadata search %s/%s book_id=%s apply=%s", index, len(book_ids), book_id, apply)
+                try:
+                    search_query = _search_query_for_book(book_id)
+                    result = search_metadata_candidates(
+                        search_query,
+                        max_candidates=search_config.max_candidates,
+                        content_extractor=content_extractor,
+                        book_id=book_id,
+                        search_config=search_config,
+                    )
+                    create_metadata_search_result(
+                        book_id=book_id,
+                        provider=search_config.provider_type,
+                        query_snapshot=asdict(search_query),
+                        diagnostics_json={"providers": [asdict(diag) for diag in result.diagnostics]},
+                        candidates_json=[_metadata_candidate_to_dict(candidate) for candidate in result.candidates],
+                        status="completed",
+                    )
+                    summary["success"] += 1
+                    if apply:
+                        candidate = _best_extracted_candidate(result.candidates)
+                        if candidate is not None:
+                            fields = _safe_search_apply_fields(book_id, candidate, include_cover=apply_cover)
+                            if fields:
+                                candidate = _candidate_with_merged_terms(book_id, candidate)
+                                MetadataSearchService(
+                                    _GuiAiRepository(),
+                                    create_metadata_search_provider(search_config, _GuiAiRepository()),
+                                ).apply_candidate(book_id, candidate, fields)
+                                summary["applied"] += len(fields)
+                except Exception as exc:
+                    create_metadata_search_result(
+                        book_id=book_id,
+                        provider=search_config.provider_type,
+                        query_snapshot={},
+                        diagnostics_json={},
+                        candidates_json=[],
+                        status="failed",
+                        error_message=str(exc),
+                    )
+                    summary["failed"] += 1
+                    summary["errors"].append(f"book {book_id}: {exc}")
+                    logger.warning("Batch metadata search failed book_id=%s: %s", book_id, exc)
+            return summary
+
+        def on_result(_tid: str, _tname: str, _bid: object, result: object) -> None:
+            if isinstance(result, dict):
+                self._refresh_batch_table(selected_book_id=self.current_book_id)
+                if self.current_book_id is not None:
+                    self._load_search_cache_for_book(self.current_book_id)
+                errors = result.get("errors") or []
+                message = (
+                    f"搜索完成：成功 {result.get('success', 0)}，失败 {result.get('failed', 0)}，"
+                    f"应用字段 {result.get('applied', 0)}。"
+                )
+                if errors:
+                    message += "\n\n失败详情：\n" + "\n".join(str(e) for e in errors[:10])
+                QMessageBox.information(self, "批量搜索资料", message)
+
+        handle = w.submit_background_task(
+            task_name="batch_metadata_search",
+            book_id=None,
+            fn=work,
+            on_result=on_result,
+            on_error=lambda _tid, _tname, _bid, err: self._show_error(f"批量搜索资料失败：{err[:400]}"),
+            on_finished=lambda _tid, _tname, _bid: self._active_handles.pop(_tid, None),
+        )
+        self._active_handles[handle.task_id] = handle
 
     def _delete_selected_batch_books(self) -> None:
         book_ids = self._selected_batch_book_ids()
@@ -2467,6 +2846,32 @@ class MainWindow(QMainWindow):
             self._show_error("请先选择一个 book。")
             return
         self._do_search_cover(book_id)
+
+    def _build_content_extractor(self) -> object | None:
+        try:
+            ai_config = load_ai_provider_config(_GuiAiRepository())
+            provider_type = ai_config.provider_type.strip().lower()
+            api_key = get_api_key_from_env(ai_config)
+            if provider_type == "openai_compatible" and not api_key:
+                logger.info(
+                    "AI content extraction skipped: API key env %s is not configured",
+                    ai_config.api_key_env,
+                )
+                return None
+            ai_provider = create_ai_provider(ai_config)
+            if not hasattr(ai_provider, "extract_from_content"):
+                logger.info("AI provider %s does not support content extraction", ai_provider.__class__.__name__)
+                return None
+            from app.search.content_extractor import MetadataContentExtractor
+            search_config = load_search_config(_GuiAiRepository())
+            return MetadataContentExtractor(
+                ai_provider,
+                _GuiAiRepository(),
+                max_content_length=search_config.content_extract_max_chars,
+            )
+        except Exception as exc:
+            logger.debug("AI content extractor not available, skipping extraction: %s", exc)
+            return None
 
     def _load_search_cache_for_book(self, book_id: int) -> None:
         cached = get_latest_metadata_search_result_by_book(book_id)
@@ -3136,7 +3541,15 @@ class MainWindow(QMainWindow):
             import time as _time
             started = _time.perf_counter()
             try:
-                result = search_metadata_candidates(search_query, max_candidates=search_config.max_candidates)
+                content_extractor = self._build_content_extractor() if search_config.ai_content_extraction_enabled else None
+
+                result = search_metadata_candidates(
+                    search_query,
+                    max_candidates=search_config.max_candidates,
+                    content_extractor=content_extractor,
+                    book_id=book_id,
+                    search_config=search_config,
+                )
                 row = create_metadata_search_result(
                     book_id=book_id,
                     provider=search_config.provider_type,
@@ -3313,6 +3726,9 @@ class _GuiAiRepository:
     def create_ai_request_log(self, **kwargs: Any) -> RowDict:
         return create_ai_request_log(**kwargs)
 
+    def get_latest_metadata_search_result_by_book(self, book_id: int) -> RowDict | None:
+        return get_latest_metadata_search_result_by_book(book_id)
+
     def get_ai_suggestion(self, ai_suggestion_id: int) -> RowDict | None:
         return get_ai_suggestion(ai_suggestion_id)
 
@@ -3361,8 +3777,13 @@ def _json_list(value: Any) -> list[Any]:
 
 def _metadata_candidate_to_dict(candidate: Any) -> dict[str, Any]:
     if isinstance(candidate, dict):
-        return candidate
-    return asdict(candidate)
+        data = dict(candidate)
+    else:
+        data = asdict(candidate)
+    raw_content = data.get("raw_content")
+    if isinstance(raw_content, str) and len(raw_content) > 20000:
+        data["raw_content"] = raw_content[:20000]
+    return data
 
 
 def _metadata_candidates_from_json(value: Any) -> list[MetadataSearchCandidate]:
@@ -3387,6 +3808,13 @@ def _metadata_candidates_from_json(value: Any) -> list[MetadataSearchCandidate]:
             "confidence",
             "verified",
             "notes",
+            "raw_content",
+            "raw_content_type",
+            "categories",
+            "images",
+            "extraction_json",
+            "extraction_status",
+            "extraction_error",
         }
         candidates.append(MetadataSearchCandidate(**{key: item.get(key) for key in allowed if key in item}))
     return candidates
@@ -3482,6 +3910,167 @@ def _flatten_novel_import_chapters(import_result: NovelImportResult) -> list[Nov
 
 def _split_terms(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _search_query_for_book(book_id: int) -> MetadataSearchQuery:
+    from app.ai.title_cleaner import clean_release_title
+
+    book = get_book(book_id)
+    if book is None:
+        raise LightBookError(f"book 不存在：{book_id}")
+    work = get_work(int(book["work_id"]))
+    if work is None:
+        raise LightBookError(f"book {book_id} 找不到对应 work。")
+    source_path = str(book.get("source_path", ""))
+    raw_filename = Path(source_path).name if source_path else ""
+    return MetadataSearchQuery(
+        book_id=book_id,
+        title=str(work.get("title", "")).strip(),
+        original_title=str(work.get("original_title", "")).strip(),
+        authors=_split_terms(str(work.get("author", ""))),
+        media_type="novel" if _is_novel_db_book(book) else "comic",
+        language_iso=str(work.get("language_iso", "zh")).strip(),
+        volume_number=book.get("volume_number"),
+        raw_filename=raw_filename,
+        local_clean_title=clean_release_title(raw_filename),
+    )
+
+
+def _apply_safe_ai_suggestion(book_id: int, suggestion: RowDict, repository: _GuiAiRepository) -> int:
+    parsed = _json_dict(suggestion.get("parsed_json"))
+    book = repository.get_book(book_id)
+    if book is None:
+        return 0
+    work = repository.get_work(int(book["work_id"]))
+    if work is None:
+        return 0
+
+    work_updates: dict[str, Any] = {}
+    book_updates: dict[str, Any] = {}
+    applied = 0
+
+    authors = _as_text_list(parsed.get("authors"))
+    if authors and not str(work.get("author") or "").strip():
+        work_updates["author"] = authors[0]
+        applied += 1
+
+    summary = str(parsed.get("summary") or "").strip()
+    if summary and _summary_can_be_replaced(str(work.get("summary") or "")):
+        work_updates["summary"] = summary
+        applied += 1
+
+    genres = _merge_term_text(str(work.get("genres") or ""), _as_text_list(parsed.get("genres")))
+    if genres != str(work.get("genres") or ""):
+        work_updates["genres"] = genres
+        applied += 1
+
+    tags = _merge_term_text(str(work.get("tags") or ""), _as_text_list(parsed.get("tags")))
+    if tags != str(work.get("tags") or ""):
+        work_updates["tags"] = tags
+        applied += 1
+
+    clean_title = str(parsed.get("clean_title") or "").strip()
+    if clean_title and _title_has_release_noise(str(work.get("title") or "")):
+        work_updates["title"] = clean_title
+        applied += 1
+
+    book_title = str(parsed.get("book_title") or "").strip()
+    if book_title and book_title != str(book.get("title") or ""):
+        book_updates["title"] = book_title
+        applied += 1
+
+    if work_updates:
+        repository.update_work(int(work["id"]), **work_updates)
+    if book_updates:
+        repository.update_book(book_id, **book_updates)
+    return applied
+
+
+def _best_extracted_candidate(candidates: list[MetadataSearchCandidate]) -> MetadataSearchCandidate | None:
+    for candidate in candidates:
+        extraction = candidate.extraction_json
+        match = extraction.get("match_assessment") if isinstance(extraction, dict) else {}
+        if (
+            candidate.extraction_status == "extracted"
+            and not (isinstance(match, dict) and match.get("is_likely_same_work") is False)
+        ):
+            return candidate
+    return candidates[0] if candidates else None
+
+
+def _safe_search_apply_fields(
+    book_id: int,
+    candidate: MetadataSearchCandidate,
+    *,
+    include_cover: bool,
+) -> list[str]:
+    book = get_book(book_id)
+    work = get_work(int(book["work_id"])) if book else None
+    if not book or not work:
+        return []
+    fields: list[str] = []
+    if candidate.authors and not str(work.get("author") or "").strip():
+        fields.append("authors")
+    if candidate.summary and _summary_can_be_replaced(str(work.get("summary") or "")):
+        fields.append("summary")
+    if candidate.genres:
+        fields.append("genres")
+    if candidate.tags:
+        fields.append("tags")
+    if include_cover and candidate.cover_url:
+        fields.append("cover_url")
+    return fields
+
+
+def _candidate_with_merged_terms(book_id: int, candidate: MetadataSearchCandidate) -> MetadataSearchCandidate:
+    book = get_book(book_id)
+    work = get_work(int(book["work_id"])) if book else None
+    if not work:
+        return candidate
+    return replace(
+        candidate,
+        genres=_split_terms(_merge_term_text(str(work.get("genres") or ""), candidate.genres)),
+        tags=_split_terms(_merge_term_text(str(work.get("tags") or ""), candidate.tags)),
+    )
+
+
+def _merge_term_text(existing: str, additions: list[str]) -> str:
+    values: list[str] = []
+    seen: set[str] = set()
+    for value in _split_terms(existing) + additions:
+        key = value.casefold()
+        if value and key not in seen:
+            seen.add(key)
+            values.append(value)
+    return ", ".join(values)
+
+
+def _as_text_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if value:
+        return [str(value).strip()]
+    return []
+
+
+def _summary_can_be_replaced(summary: str) -> bool:
+    text = summary.strip()
+    if not text:
+        return True
+    low_quality = ("这是第", "本卷为《", "共 ", "元数据建议", "metadata")
+    return any(part in text for part in low_quality)
+
+
+def _title_has_release_noise(title: str) -> bool:
+    import re
+
+    return bool(
+        re.search(r"\[(?:Kome|Kmoe|汉化|自购|DL|扫图|电子版)\]", title, re.IGNORECASE)
+        or re.search(r"(?:第\s*\d+\s*卷|卷\s*\d+|[Vv]ol\.?\s*\d+|[Vv]\d+)", title)
+        or re.search(r"\.(?:epub|cbz|txt|zip)$", title, re.IGNORECASE)
+    )
 
 
 def _resolve_titles_from_import(

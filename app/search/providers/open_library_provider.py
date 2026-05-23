@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import time
 from typing import Any
 
@@ -21,8 +22,9 @@ _cache: dict[str, tuple[float, list[MetadataSearchCandidate]]] = {}
 class OpenLibraryProvider(BaseMetadataSearchProvider):
     name = "open_library"
 
-    def __init__(self, timeout_seconds: int = 10) -> None:
+    def __init__(self, timeout_seconds: int = 10, base_url: str = "https://openlibrary.org") -> None:
         self.timeout_seconds = timeout_seconds
+        self.base_url = base_url.rstrip("/")
         self._error: str | None = None
 
     @property
@@ -67,7 +69,7 @@ class OpenLibraryProvider(BaseMetadataSearchProvider):
 
         try:
             response = httpx.get(
-                _OL_SEARCH_URL,
+                f"{self.base_url}/search.json",
                 params=params,
                 timeout=self.timeout_seconds,
                 follow_redirects=True,
@@ -133,6 +135,15 @@ def _parse_docs(docs: list[dict[str, Any]]) -> list[MetadataSearchCandidate]:
             if i:
                 isbns.append(str(i))
 
+        raw_content_data = {
+            "title": doc.get("title"),
+            "author_name": doc.get("author_name"),
+            "publisher": doc.get("publisher"),
+            "first_publish_year": doc.get("first_publish_year"),
+            "subject": (doc.get("subject") or [])[:30],
+            "isbn": (doc.get("isbn") or [])[:10],
+        }
+
         result.append(MetadataSearchCandidate(
             title=title,
             original_title="",
@@ -148,6 +159,11 @@ def _parse_docs(docs: list[dict[str, Any]]) -> list[MetadataSearchCandidate]:
             genres=[],
             tags=[str(s).strip() for s in (doc.get("subject") or [])[:8] if str(s).strip()],
             verified=True,
+            raw_content=json.dumps(raw_content_data, ensure_ascii=False)[:20000],
+            raw_content_type="api_json",
+            categories=[str(s).strip() for s in (doc.get("subject") or [])[:30] if str(s).strip()],
+            images=[cover_url] if cover_url else [],
+            extraction_status="not_extracted",
         ))
 
     return result

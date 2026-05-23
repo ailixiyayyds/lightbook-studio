@@ -1,10 +1,20 @@
+"""Metadata search pipeline that coordinates multiple providers.
+
+This module provides the main search functionality that:
+1. Queries multiple metadata providers
+2. Deduplicates and scores results
+3. Optionally runs AI content extraction on candidates
+"""
+
 from __future__ import annotations
 
 import logging
 import time
 from dataclasses import dataclass, field
+from typing import Any, Protocol
 
 from app.search.candidate_ranker import score_and_sort
+from app.search.config import SearchConfig
 from app.search.provider import BaseMetadataSearchProvider
 from app.search.types import MetadataSearchCandidate, MetadataSearchQuery
 
@@ -29,12 +39,54 @@ class SearchResult:
     diagnostics: list[ProviderDiagnostic] = field(default_factory=list)
 
 
+class ContentExtractorProtocol(Protocol):
+    """Protocol for content extractor."""
+
+    def extract_from_candidate(
+        self,
+        query: MetadataSearchQuery,
+        candidate: MetadataSearchCandidate,
+        *,
+        book_id: int | None = None,
+    ) -> MetadataSearchCandidate:
+        """Extract metadata from candidate's raw content."""
+        ...
+
+
 def search_metadata_candidates(
     query: MetadataSearchQuery,
     *,
     max_candidates: int = 10,
+    content_extractor: ContentExtractorProtocol | None = None,
+    book_id: int | None = None,
+    search_config: SearchConfig | None = None,
 ) -> SearchResult:
-    providers = _init_providers()
+    """Search for metadata candidates from multiple providers.
+
+    Args:
+        query: The search query.
+        max_candidates: Maximum number of candidates to return.
+        content_extractor: Optional content extractor for AI extraction.
+            If provided, it is passed to providers that support enrichment
+            (Moegirl, Bangumi) so they can run extraction during search.
+        book_id: Optional book ID for logging.
+
+    Returns:
+        SearchResult with candidates and diagnostics.
+    """
+    if search_config is not None and not search_config.enabled:
+        return SearchResult(
+            candidates=[],
+            diagnostics=[
+                ProviderDiagnostic(
+                    name="metadata_search",
+                    enabled=False,
+                    error="资料搜索已在设置中禁用",
+                )
+            ],
+        )
+
+    providers = _init_providers(content_extractor=content_extractor, config=search_config)
     all_diags: list[ProviderDiagnostic] = []
     all_candidates: list[MetadataSearchCandidate] = []
 
@@ -70,26 +122,170 @@ def search_metadata_candidates(
     deduped = _deduplicate(all_candidates)
     sorted_candidates = score_and_sort(query, deduped)
 
+    # Run AI content extraction on candidates from providers that don't
+    # handle extraction themselves (Google Books, Open Library, etc.)
+    if content_extractor is not None:
+        extract_limit = search_config.content_extract_top_n if search_config is not None else None
+        sorted_candidates = _run_content_extraction(
+            query,
+            sorted_candidates,
+            content_extractor,
+            book_id=book_id,
+            max_extractions=extract_limit,
+        )
+        sorted_candidates = score_and_sort(query, sorted_candidates)
+
     return SearchResult(
         candidates=sorted_candidates[:max_candidates],
         diagnostics=all_diags,
     )
 
 
-def _init_providers() -> list[BaseMetadataSearchProvider]:
+def _run_content_extraction(
+    query: MetadataSearchQuery,
+    candidates: list[MetadataSearchCandidate],
+    extractor: ContentExtractorProtocol,
+    *,
+    book_id: int | None = None,
+    max_extractions: int | None = None,
+) -> list[MetadataSearchCandidate]:
+    """Run AI content extraction on candidates with raw content.
+
+    Only extracts candidates that have raw_content and haven't been
+    extracted yet (extraction_status == "not_extracted"). Candidates
+    already extracted by their provider (extraction_status != "not_extracted")
+    are skipped to avoid double extraction.
+    """
+    extracted: list[MetadataSearchCandidate] = []
+    extraction_count = 0
+
+    for candidate in candidates:
+        should_extract = candidate.raw_content and candidate.extraction_status == "not_extracted"
+        if should_extract and max_extractions is not None and extraction_count >= max_extractions:
+            extracted.append(candidate)
+            continue
+
+        if should_extract:
+            try:
+                logger.debug(
+                    "Running content extraction for candidate title=%s source=%s",
+                    candidate.title,
+                    candidate.source_name,
+                )
+                updated = extractor.extract_from_candidate(
+                    query,
+                    candidate,
+                    book_id=book_id,
+                )
+                extraction_count += 1
+                extracted.append(updated)
+            except Exception as exc:
+                logger.warning(
+                    "Content extraction failed for candidate title=%s: %s",
+                    candidate.title,
+                    exc,
+                )
+                # Keep original candidate with failed status
+                extracted.append(
+                    MetadataSearchCandidate(
+                        title=candidate.title,
+                        original_title=candidate.original_title,
+                        authors=candidate.authors,
+                        publisher=candidate.publisher,
+                        publication_date=candidate.publication_date,
+                        isbn=candidate.isbn,
+                        summary=candidate.summary,
+                        cover_url=candidate.cover_url,
+                        source_name=candidate.source_name,
+                        source_url=candidate.source_url,
+                        source_type=candidate.source_type,
+                        genres=candidate.genres,
+                        tags=candidate.tags,
+                        confidence=candidate.confidence,
+                        verified=candidate.verified,
+                        notes=candidate.notes,
+                        raw_content=candidate.raw_content,
+                        raw_content_type=candidate.raw_content_type,
+                        categories=candidate.categories,
+                        images=candidate.images,
+                        extraction_json={},
+                        extraction_status="failed",
+                        extraction_error=str(exc),
+                    )
+                )
+                extraction_count += 1
+        else:
+            extracted.append(candidate)
+
+    return extracted
+
+
+def _init_providers(
+    content_extractor: ContentExtractorProtocol | None = None,
+    config: SearchConfig | None = None,
+) -> list[BaseMetadataSearchProvider]:
     from app.search.providers.bangumi_provider import BangumiProvider
     from app.search.providers.google_books_provider import GoogleBooksProvider
     from app.search.providers.moegirl_provider import MoegirlProvider
     from app.search.providers.open_library_provider import OpenLibraryProvider
-    from app.search.providers.other_providers import NdlSearchProvider
+    from app.search.providers.other_providers import GenericSearchProvider, NdlSearchProvider
 
-    return [
-        BangumiProvider(timeout_seconds=10),
-        MoegirlProvider(timeout_seconds=8),
-        GoogleBooksProvider(timeout_seconds=10),
-        NdlSearchProvider(timeout_seconds=10),
-        OpenLibraryProvider(timeout_seconds=6),
-    ]
+    cfg = config or SearchConfig()
+    providers: list[BaseMetadataSearchProvider] = []
+    if cfg.bangumi_enabled:
+        providers.append(
+            BangumiProvider(
+                timeout_seconds=cfg.bangumi_timeout_seconds,
+                content_extractor=content_extractor,
+                base_url=cfg.bangumi_base_url,
+                user_agent=cfg.bangumi_user_agent,
+                max_queries=cfg.bangumi_max_queries,
+            )
+        )
+    if cfg.moegirl_enabled:
+        providers.append(
+            MoegirlProvider(
+                timeout_seconds=cfg.moegirl_timeout_seconds,
+                content_extractor=content_extractor,
+                api_url=cfg.moegirl_api_url,
+                user_agent=cfg.moegirl_user_agent,
+                parse_api_enabled=cfg.moegirl_parse_api_enabled,
+                wikitext_fallback_enabled=cfg.moegirl_wikitext_fallback_enabled,
+                html_fallback_enabled=cfg.moegirl_html_fallback_enabled,
+                max_detail_pages=cfg.moegirl_max_detail_pages,
+            )
+        )
+    if cfg.google_books_enabled:
+        providers.append(
+            GoogleBooksProvider(
+                timeout_seconds=cfg.google_books_timeout_seconds,
+                api_key_env=cfg.google_books_api_key_env,
+            )
+        )
+    if cfg.ndl_enabled:
+        providers.append(
+            NdlSearchProvider(
+                timeout_seconds=cfg.ndl_timeout_seconds,
+                base_url=cfg.ndl_base_url,
+            )
+        )
+    if cfg.open_library_enabled:
+        providers.append(
+            OpenLibraryProvider(
+                timeout_seconds=cfg.open_library_timeout_seconds,
+                base_url=cfg.open_library_base_url,
+            )
+        )
+    if cfg.generic_search_provider.strip().casefold() != "disabled":
+        providers.append(
+            GenericSearchProvider(
+                enabled=True,
+                provider_type=cfg.generic_search_provider,
+                endpoint=cfg.generic_search_endpoint,
+                api_key_env=cfg.generic_search_api_key_env,
+            )
+        )
+    return providers
 
 
 def _deduplicate(candidates: list[MetadataSearchCandidate]) -> list[MetadataSearchCandidate]:

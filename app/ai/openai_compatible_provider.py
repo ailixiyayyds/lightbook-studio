@@ -190,6 +190,47 @@ class OpenAICompatibleProvider(BaseAiProvider):
             return True
         raise AiProviderParseError("AI provider test response did not contain ok=true.")
 
+    def extract_from_content(
+        self,
+        system_prompt: str,
+        user_content: str,
+    ) -> str:
+        """Extract structured data from content using AI.
+
+        This is a simpler interface for content extraction that returns
+        raw text instead of parsed metadata.
+
+        Args:
+            system_prompt: The system prompt for extraction.
+            user_content: The user content to extract from.
+
+        Returns:
+            Raw text response from AI.
+        """
+        self._ensure_configured()
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"},
+            "stream": False,
+        }
+        logger.info(
+            "AI extract_from_content start model=%s user_content_len=%s",
+            self.model,
+            len(user_content),
+        )
+        response_data = self._post_chat_completion(payload)
+        raw_text = _extract_message_content(response_data)
+        logger.info(
+            "AI extract_from_content complete response_len=%s",
+            len(raw_text),
+        )
+        return raw_text
+
     def _post_chat_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
         url = _chat_completions_url(self.base_url)
         try:

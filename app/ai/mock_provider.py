@@ -63,6 +63,42 @@ class MockAiProvider(BaseAiProvider):
             confidence=float(parsed["confidence"]),
         )
 
+    def extract_from_content(self, system_prompt: str, user_content: str) -> str:
+        """Return deterministic structured extraction for offline workflows."""
+        try:
+            payload = json.loads(user_content)
+        except json.JSONDecodeError:
+            payload = {}
+        candidate = payload.get("candidate", {}) if isinstance(payload, dict) else {}
+        existing = payload.get("existing_candidate_fields", {}) if isinstance(payload, dict) else {}
+        images = payload.get("images", []) if isinstance(payload, dict) else []
+        categories = payload.get("categories", []) if isinstance(payload, dict) else []
+        raw_content = str(payload.get("raw_content", "") if isinstance(payload, dict) else "")
+        summary = str(existing.get("summary") or "").strip()
+        if not summary and raw_content:
+            summary = raw_content.strip().replace("\r\n", "\n").split("\n", 1)[0][:240]
+        parsed = {
+            "title": str(candidate.get("title") or "").strip(),
+            "original_title": "",
+            "authors": _list_value(existing.get("authors")),
+            "publisher": str(existing.get("publisher") or ""),
+            "publication_date": str(existing.get("publication_date") or ""),
+            "summary_zh": summary,
+            "genres": _list_value(existing.get("genres")) or _list_value(categories)[:3],
+            "tags": _list_value(existing.get("tags"))[:10],
+            "cover_url_candidates": _list_value(images)[:1],
+            "content_warnings": [],
+            "match_assessment": {
+                "is_likely_same_work": True,
+                "reason": "Mock extractor keeps API candidate metadata for workflow testing.",
+                "matched_titles": [str(candidate.get("title") or "")],
+                "matched_authors": _list_value(existing.get("authors")),
+            },
+            "translation_notes": [],
+            "notes": ["mock extraction"],
+        }
+        return json.dumps(parsed, ensure_ascii=False, sort_keys=True)
+
 
 def _first_text(*values: object) -> str:
     for value in values:
